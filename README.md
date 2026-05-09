@@ -47,10 +47,10 @@ Some examples of using EEG to reconstruct stimulus images.
 ## News:
 
 > [!IMPORTANT]
-> **[2025/05] Major Code Refactoring on [`develop`](https://github.com/dongyangli-del/EEG_Image_decode/tree/develop) branch!** The refactored codebase now supports:
-> 1. **Validation split & early stopping** — Proper validation set partitioning with early stopping for model selection
-> 2. **End-to-end retrieval benchmark** — Standardized evaluation pipeline for retrieval tasks
-> 3. **Reconstruction benchmark (high-level + low-level)** — Complete image reconstruction evaluation combining both high-level semantic and low-level structural pipelines
+> **[2026/05] Major Code Refactoring on [`develop`](https://github.com/dongyangli-del/EEG_Image_decode/tree/develop) branch!** The refactored codebase now supports:
+> 1. **Validation split & early stopping**: Proper validation set partitioning with early stopping for model selection.
+> 2. **End-to-end retrieval benchmark**: Standardized evaluation pipeline for retrieval tasks.
+> 3. **Reconstruction benchmark (high-level + low-level)**: Complete image reconstruction evaluation combining both high-level semantic and low-level structural pipelines.
 >
 > Please switch to the `develop` branch for the latest features:
 > ```bash
@@ -112,7 +112,7 @@ python ATMS_retrieval_joint_train.py --joint_train --sub sub-01 True --logger Tr
 Additionally, replicating the results of other methods (e.g. EEGNetV4) by run
 ```
 cd Retrieval/
-contrast_retrieval.py --encoder_type EEGNetv4_Encoder --epochs 30 --batch_size 1024
+contrast_retrieval.py --encoder_type EEGNetv4_Encoder --epochs 100 --batch_size 1024
 ```
 
 #### 2.Image Reconstruction
