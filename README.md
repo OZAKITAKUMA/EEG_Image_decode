@@ -45,6 +45,18 @@ Some examples of using EEG to reconstruct stimulus images.
 
 
 ## News:
+
+> [!IMPORTANT]
+> **[2025/05] Major Code Refactoring on [`develop`](https://github.com/dongyangli-del/EEG_Image_decode/tree/develop) branch!** The refactored codebase now supports:
+> 1. **Validation split & early stopping** — Proper validation set partitioning with early stopping for model selection
+> 2. **End-to-end retrieval benchmark** — Standardized evaluation pipeline for retrieval tasks
+> 3. **Reconstruction benchmark (high-level + low-level)** — Complete image reconstruction evaluation combining both high-level semantic and low-level structural pipelines
+>
+> Please switch to the `develop` branch for the latest features:
+> ```bash
+> git checkout develop
+> ```
+
 - [2024/09/26] Our paper is accepted to **NeurIPS 2024**.
 - [2024/09/25] We have updated the [arxiv](https://arxiv.org/abs/2403.07721) paper.
 - [2024/08/01] Update scripts for training and inference in different tasks.
