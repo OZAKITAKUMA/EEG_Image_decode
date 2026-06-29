@@ -134,3 +134,6 @@ Retrieval/wandb/
 .cache/
 tmp/
 temp/
+
+# データなど
+data/
