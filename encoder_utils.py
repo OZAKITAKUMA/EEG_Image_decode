@@ -160,8 +160,8 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
     model.train()
     img_pool = img_features_all.to(device).float()
     # In generation mode the pool is every-10th sample (one per class)
-    if loss_mode == 'generation':
-        img_pool = img_pool[::10]
+    # if loss_mode == 'generation':
+    #     img_pool = img_pool[::10]
 
     subject_id = _extract_subject_id(sub)
     total_loss = 0.0
