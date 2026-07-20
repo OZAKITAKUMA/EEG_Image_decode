@@ -41,9 +41,11 @@ set -e
 #==============================================================================
 # [DATA PATHS] - Modify these to match your data location
 #==============================================================================
-DATA_PATH="${DATA_PATH:-/vePFS-0x0d/visual/dataset/THINGS_EEG/Preprocessed_data_250Hz}"
-IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/training_images}"
-IMG_DIR_TEST="${IMG_DIR_TEST:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/test_images}"
+DATA_PATH="${DATA_PATH:-/home/moepy/ozakitakuma/data_eeg}"
+IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/home/moepy/ozakitakuma/data_image/training_images}"
+IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
+
+
 # FEATURES_DIR: CLIP feature cache directory.
 # Leave empty (default) → EEGDataset uses EEG_Image_decode/features/ (shared with Retrieval).
 # Set explicitly only to override the cache location, e.g. a fast local SSD.
@@ -60,7 +62,7 @@ OUTPUT_DIR="./outputs/benchmark"
 # [SUBJECT LIST]
 # Override at runtime: SUBJECTS="sub-01 sub-08" bash benchmark.sh
 #==============================================================================
-SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
+SUBJECTS="${SUBJECTS:-sub-01}"
 
 #==============================================================================
 # [RESUME] - Skip training, load models from a previous run timestamp
@@ -92,11 +94,11 @@ PATIENCE=50               # Early-stopping patience (both Phase 1 and Phase 2)
 #==============================================================================
 # [EVALUATION HYPERPARAMETERS]
 #==============================================================================
-NUM_GEN_PER_CLASS=3      # Generated images per test class (= evaluation rounds)
+NUM_GEN_PER_CLASS=1      # Generated images per test class (= evaluation rounds)
 PRIOR_INFERENCE_STEPS=50  # Diffusion Prior denoising steps
 GUIDANCE_SCALE=5.0        # Classifier-free guidance scale
 SDXL_INFERENCE_STEPS=4    # SDXL-Turbo denoising steps
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-32}"  # SDXL generation batch size (images per forward pass)
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-8}"  # SDXL generation batch size (images per forward pass)
 #
 # EVAL_ENCODER_RECON=true:
 #   Also run Stage-1 generation (encoder embeddings → SDXL, bypassing the prior)
@@ -106,7 +108,7 @@ EVAL_ENCODER_RECON="${EVAL_ENCODER_RECON:-true}"
 #==============================================================================
 # [GPU SETTINGS]
 #==============================================================================
-GPU="${GPU:-cuda:1}"
+GPU="${GPU:-cuda:0}"
 # export CUDA_VISIBLE_DEVICES=0  # Uncomment to restrict GPU
 
 #==============================================================================
@@ -189,10 +191,12 @@ for SUBJECT in ${SUBJECTS}; do
             echo "[WARN] Encoder not found: ${ENCODER_PATH}. Skipping ${SUBJECT}."
             continue
         fi
+
         if [ ! -f "${PRIOR_PATH}" ]; then
             echo "[WARN] Prior not found: ${PRIOR_PATH}. Skipping ${SUBJECT}."
             continue
         fi
+
 
         echo "  [INFO] Resuming from timestamp ${TIMESTAMP} for ${SUBJECT}."
         echo "    Encoder: ${ENCODER_PATH}"
@@ -290,6 +294,9 @@ for SUBJECT in ${SUBJECTS}; do
         --prior_dropout ${PRIOR_DROPOUT} \
         --gpu \"${GPU}\" \
         --seed ${SEED}"
+    
+    EVAL_CMD="${EVAL_CMD} --sdxl_model_path \"${SDXL_MODEL_PATH}\""
+    EVAL_CMD="${EVAL_CMD} --ip_adapter_path \"${IP_ADAPTER_PATH}\""
 
     # Only override the shared feature cache when an explicit path is given
     if [ -n "${FEATURES_DIR}" ]; then
