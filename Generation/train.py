@@ -70,11 +70,66 @@ def train_prior_one_epoch(pipe, dataloader):
         pipe._optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(pipe.diffusion_prior.parameters(), 1.0)
-        pipe._lr_scheduler.step()
         pipe._optimizer.step()
+        pipe._lr_scheduler.step()
         loss_sum += loss.item()
 
     return loss_sum / len(dataloader)
+
+@torch.no_grad()    
+def validate_prior_one_epoch(pipe, dataloader, seed=42,):
+    pipe.diffusion_prior.eval()
+    device = pipe.device
+    num_train_timesteps = pipe.scheduler.config.num_train_timesteps
+    generator = torch.Generator(device=device).manual_seed(seed)
+
+    loss_sum = 0.0
+    total_elements = 0
+
+    for batch in dataloader:
+        c_embeds = batch["c_embedding"].to(device)
+        h_embeds = batch["h_embedding"].to(device)
+
+        batch_size = h_embeds.shape[0]
+
+        noise = torch.randn(
+            h_embeds.shape,
+            dtype=h_embeds.dtype,
+            device=device,
+            generator=generator,
+        )
+
+        timesteps = torch.randint(
+            0,
+            num_train_timesteps,
+            (batch_size,),
+            device=device,
+            generator=generator,
+        )
+
+        perturbed_h_embeds = pipe.scheduler.add_noise(
+            h_embeds,
+            noise,
+            timesteps,
+        )
+
+        predicted_noise = pipe.diffusion_prior(
+            perturbed_h_embeds,
+            timesteps,
+            c_embeds,
+        )
+
+        # 全要素のMSEを合計
+        loss = nn.functional.mse_loss(
+            predicted_noise,
+            noise,
+            reduction="sum",
+        )
+
+        loss_sum += loss.item()
+        total_elements += noise.numel()
+
+    return loss_sum / total_elements
 
 
 def setup_prior_optimizer(pipe, dataloader, num_epochs, learning_rate):
@@ -223,7 +278,7 @@ def main():
     best_val_loss = float('inf')
     best_val_acc = 0.0
     best_encoder_epoch = 0
-    best_prior_loss = float('inf')
+    best_prior_val_loss = float("inf")
     best_prior_epoch = 0
     patience_counter = 0
     prior_initialized = False
@@ -276,19 +331,31 @@ def main():
             )
 
         # 2. Phase 2: extract features & train prior
-        # diffusionのtrainを行う
+        # diffusionのtrainとvalidationを行う
         prior_loss = None
+        prior_val_loss = None
         if is_prior_phase:
             if not finetune and not prior_initialized:
                 # Frozen encoder → features constant, extract once
-                eeg_feats, img_feats = extract_features_ordered(
-                    sub, eeg_model, full_train_loader_ordered, device)
-                prior_dataset = EmbeddingDataset(c_embeddings=eeg_feats, h_embeddings=img_feats)
-                prior_loader = DataLoader(prior_dataset, batch_size=args.prior_batch_size,
-                                          shuffle=True, num_workers=0)
+                # train用の特徴抽出
+                train_eeg_feats, train_img_feats = extract_features_ordered(
+                    sub, eeg_model, train_loader_ordered, device)
+                # valdation用の特徴抽出
+                val_eeg_feats, val_img_feats = extract_features_ordered(
+                    sub, eeg_model, val_loader, device)
+                
+                # 埋め込み特徴量をデータセットにまとめる
+                prior_train_dataset = EmbeddingDataset(c_embeddings=train_eeg_feats, h_embeddings=train_img_feats)
+                prior_val_dataset = EmbeddingDataset(c_embeddings=val_eeg_feats, h_embeddings=val_img_feats)
+                
+                # loaderにセットする
+                prior_loader = DataLoader(prior_train_dataset, batch_size=args.prior_batch_size, shuffle=True, num_workers=0)
+                prior_val_loader = DataLoader(prior_val_dataset, batch_size=args.prior_batch_size, shuffle=False, num_workers=0)
+                
                 remaining = args.total_epochs - encoder_only_epochs
                 setup_prior_optimizer(pipe, prior_loader, remaining, args.lr_prior)
                 prior_initialized = True
+
             elif finetune:
                 # Finetuning → encoder changes, re-extract every epoch
                 eeg_feats, img_feats = extract_features_ordered(
@@ -304,6 +371,8 @@ def main():
             for _ in range(args.prior_epochs_per_step):
                 prior_loss = train_prior_one_epoch(pipe, prior_loader)
 
+            prior_val_loss = validate_prior_one_epoch(pipe, prior_val_loader, seed=args.seed,)
+
         # 3. Evaluate on VALIDATION set (never test set)
         val_loss, val_acc = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
@@ -316,6 +385,7 @@ def main():
             "train_acc": f"{train_acc:.4f}" if train_acc is not None else "N/A",
             "val_loss": f"{val_loss:.4f}", "val_acc": f"{val_acc:.4f}",
             "prior_loss": f"{prior_loss:.4f}" if prior_loss is not None else "N/A",
+            "prior_val_loss": f"{prior_val_loss:.4f}" if prior_val_loss is not None else "N/A",
         }
         results.append(epoch_results)
 
@@ -330,8 +400,10 @@ def main():
                   f"| Val L={val_loss:.4f} A={val_acc:.4f}")
         else:
             print(f"[{phase_str}] Epoch {epoch+1}/{args.total_epochs} "
-                  f"| Prior L={prior_loss:.4f} "
-                  f"| Val L={val_loss:.4f} A={val_acc:.4f}")
+                  f"| Prior Train L={prior_loss:.4f} "
+                  f"| Prior Val L={prior_val_loss:.4f} "
+                  f"| Encoder Val L={val_loss:.4f} "
+                  f"A={val_acc:.4f}")
 
         # 5. Model selection & early stopping
         if not is_prior_phase:
@@ -363,13 +435,15 @@ def main():
                 patience_counter += 1
         else:
             # Phase 2 frozen: select best prior by prior_loss
-            if prior_loss < best_prior_loss:
-                best_prior_loss = prior_loss
+            # ファインチューニングじゃない場合かつpriorのモデル選択
+            if prior_val_loss < best_prior_val_loss:
+                best_prior_val_loss = prior_val_loss
                 best_prior_epoch = epoch + 1
                 patience_counter = 0
+
                 torch.save(pipe.diffusion_prior.state_dict(),
                            os.path.join(prior_save_dir, 'best.pth'))
-                print(f"  ★ New best prior: loss={best_prior_loss:.4f}")
+                print(f"  ★ New best prior: loss={best_prior_val_loss:.4f}")
             else:
                 patience_counter += 1
 
@@ -408,7 +482,7 @@ def main():
     print(f"\n{'='*55}")
     print(f"Training finished at epoch {epoch+1}")
     print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
-    print(f"Best prior:   epoch {best_prior_epoch}  prior_loss={best_prior_loss:.4f}")
+    print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
     print(f"  Encoder: {best_encoder_path}")
     print(f"  Prior:   {best_prior_path}")
     print(f"{'='*55}")
@@ -416,7 +490,11 @@ def main():
     # ── Save training log ────────────────────────────────────────────────
     results_file = os.path.join(results_dir, 'training_log.csv')
     with open(results_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
+        writer = csv.DictWriter(
+        f,
+        fieldnames=results[0].keys(),
+        delimiter="\t",
+    )
         writer.writeheader()
         writer.writerows(results)
     print(f"Training log: {results_file}")
@@ -432,7 +510,7 @@ def main():
         f.write(f"best_val_loss={best_val_loss:.4f}\n")
         f.write(f"best_val_acc={best_val_acc:.4f}\n")
         f.write(f"best_prior_epoch={best_prior_epoch}\n")
-        f.write(f"best_prior_loss={best_prior_loss:.4f}\n")
+        f.write(f"best_prior_val_loss={best_prior_val_loss:.4f}\n")
     print(f"Paths info:   {info_path}")
 
 
