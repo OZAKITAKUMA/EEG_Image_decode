@@ -276,6 +276,7 @@ def main():
             )
 
         # 2. Phase 2: extract features & train prior
+        # diffusionのtrainを行う
         prior_loss = None
         if is_prior_phase:
             if not finetune and not prior_initialized:
