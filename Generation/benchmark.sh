@@ -76,6 +76,17 @@ SUBJECTS="${SUBJECTS:-sub-01}"
 #==============================================================================
 RESUME="${RESUME:-}"
 
+# clip：Projection後の1024次元
+# cls：Projection前のCLS 1280次元
+FEATURE_SPACE="${FEATURE_SPACE:-cls}"
+
+if [ "${FEATURE_SPACE}" != "clip" ] && \
+   [ "${FEATURE_SPACE}" != "cls" ]; then
+
+    echo "[ERROR] FEATURE_SPACE must be clip or cls"
+    echo "Current value: ${FEATURE_SPACE}"
+    exit 1
+fi
 #==============================================================================
 # [TRAINING HYPERPARAMETERS]
 #==============================================================================
@@ -145,6 +156,7 @@ echo "  Total epochs:    ${TOTAL_EPOCHS}  (encoder-only: first ${ENCODER_ONLY_EP
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  Val ratio:       ${VAL_RATIO}  |  Early-stop patience: ${PATIENCE}"
 echo "  Encoder finetune:${ENCODER_FINETUNING}"
+echo "  Feature space:   ${FEATURE_SPACE}"
 if [ -n "${RESUME}" ]; then
 echo "  RESUME timestamp:${RESUME}  (skip training)"
 fi
@@ -229,7 +241,8 @@ for SUBJECT in ${SUBJECTS}; do
             --seed ${SEED} \
             --save_interval ${SAVE_INTERVAL} \
             --val_ratio ${VAL_RATIO} \
-            --patience ${PATIENCE}"
+            --patience ${PATIENCE} \
+            --feature_space ${FEATURE_SPACE}"
 
         # Only override the shared feature cache when an explicit path is given
         if [ -n "${FEATURES_DIR}" ]; then
@@ -293,6 +306,7 @@ for SUBJECT in ${SUBJECTS}; do
         --sdxl_steps ${SDXL_INFERENCE_STEPS} \
         --gen_batch_size ${GEN_BATCH_SIZE} \
         --prior_dropout ${PRIOR_DROPOUT} \
+        --feature_space ${FEATURE_SPACE} \
         --gpu \"${GPU}\" \
         --seed ${SEED}"
 

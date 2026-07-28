@@ -200,6 +200,16 @@ def main():
     parser.add_argument('--avg_trials', action='store_true',
                         help='Average the 4 trials per condition into one signal '
                              'before training (reduces noise, shrinks dataset 4x).')
+    parser.add_argument(
+    "--feature_space",
+    choices=["clip", "cls"],
+    default="cls",
+    help=(
+        "Image feature space: "
+        "'clip'=1024-D projected CLIP, "
+        "'cls'=1280-D pre-projection CLS"
+    ),
+)
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -213,6 +223,7 @@ def main():
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
     encoder_only_epochs = int(args.total_epochs * args.encoder_only_ratio)
+    feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     # ── Data ─────────────────────────────────────────────────────────────
     full_train_dataset = EEGDataset(args.data_path,
@@ -220,8 +231,17 @@ def main():
                                     img_dir_test=args.img_dir_test,
                                     features_dir=args.features_dir,
                                     subjects=[sub], train=True,
-                                    avg_trials=args.avg_trials)
+                                    avg_trials=args.avg_trials,
+                                    feature_space=args.feature_space,
+)
     img_features_all = full_train_dataset.img_features          # (16540, 1024)
+    if img_features_all.shape[-1] != feature_dim:
+        raise RuntimeError(
+            "Image feature dimension mismatch: "
+            f"feature_space={args.feature_space}, "
+            f"expected={feature_dim}, "
+            f"actual={img_features_all.shape[-1]}"
+        )
     img_features_per_class = img_features_all[::10].clone()     # (1654, 1024)
 
     # Stratified split: 9 conditions → train, 1 condition → val (per class)
@@ -251,6 +271,8 @@ def main():
     print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
     print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
     print(f"  Encoder finetuning: {finetune}")
+    print(f"  Feature space:   "f"{args.feature_space}")
+    print(f"  Feature dim:     "f"{feature_dim}")
     print(f"  Subject:         {sub}")
     print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
     print(f"  Val samples:     {len(val_indices)}  ({len(val_indices)/len(full_train_dataset)*100:.0f}%)")
@@ -258,11 +280,11 @@ def main():
     print(f"========================")
 
     # ── Models ───────────────────────────────────────────────────────────
-    eeg_model = ATMS(outputs_dim=1280)
+    eeg_model = ATMS(outputs_dim=feature_dim)
     eeg_model.to(device)
     encoder_optimizer = AdamW(eeg_model.parameters(), lr=args.lr_encoder)
 
-    diffusion_prior = DiffusionPriorUNet(cond_dim=1280, embed_dim=1280, dropout=args.prior_dropout)
+    diffusion_prior = DiffusionPriorUNet(cond_dim=feature_dim, embed_dim=feature_dim, dropout=args.prior_dropout,)
     pipe = Pipe(diffusion_prior, device=device)
 
     # ── Directories ──────────────────────────────────────────────────────
@@ -511,6 +533,8 @@ def main():
         f.write(f"best_val_acc={best_val_acc:.4f}\n")
         f.write(f"best_prior_epoch={best_prior_epoch}\n")
         f.write(f"best_prior_val_loss={best_prior_val_loss:.4f}\n")
+        f.write(f"feature_space="f"{args.feature_space}\n")
+        f.write(f"feature_dim="f"{feature_dim}\n")
     print(f"Paths info:   {info_path}")
 
 

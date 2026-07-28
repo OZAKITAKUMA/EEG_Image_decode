@@ -59,7 +59,6 @@ def report_embedding_cosine(
     eeg_features,
     prior_features,
     target_features,
-    clip_projection,
 ):
     """
     eeg_features:    EEG Encoder出力
@@ -94,42 +93,7 @@ def report_embedding_cosine(
     print(
         f"Priorによる変化: "
         f"{(prior_cosine - encoder_cosine).mean().item():+.4f}"
-    )
-    print("=============================\n")
-
-    # 全てCPU・floatにそろえる
-    projection = clip_projection.detach().cpu().float()
-
-    # 1280 → 1024
-    eeg_clip = eeg_features @ projection
-    prior_clip = prior_features @ projection
-    target_clip = target_features @ projection
-
-    encoder_clip_cosine = F.cosine_similarity(
-        eeg_clip,
-        target_clip,
-        dim=1,
-    )
-
-    prior_clip_cosine = F.cosine_similarity(
-        prior_clip,
-        target_clip,
-        dim=1,
-    )
-
-    print("\n===== CLIP projection後（1024次元）=====")
-    print(
-        f"Encoder → Image CLIP: "
-        f"{encoder_clip_cosine.mean().item():.4f}"
-    )
-    print(
-        f"Prior → Image CLIP:   "
-        f"{prior_clip_cosine.mean().item():.4f}"
-    )
-    print(
-        f"Priorによる変化: "
-        f"{(prior_clip_cosine - encoder_clip_cosine).mean().item():+.4f}"
-    )
+    )    
     print("======================================\n")
 
 def load_test_texts(img_directory_test):
@@ -217,7 +181,6 @@ def generate_images(eeg_features_test, img_features_test, pipe, generator, texts
     eeg_features=eeg_features_test,
     prior_features=prior_embeds,
     target_features=img_features_test,
-    clip_projection=clip_projection,
     )
 
     # Image CLS空間 1280 → CLIP空間 1024
@@ -484,7 +447,11 @@ def main():
                         help='Also evaluate encoder-only reconstruction (Stage 1, no prior) '
                              'and print a side-by-side comparison with the full pipeline (Stage 2)')
     parser.add_argument("--cosine_only", action="store_true", help="コサイン類似度だけ計算して画像生成を行わない",)
+    parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
+                        help=("Feature space used by the trained encoder and prior"),)
     args = parser.parse_args()
+
+    feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -499,13 +466,32 @@ def main():
                               img_dir_training=args.img_dir_training,
                               img_dir_test=args.img_directory_test,
                               features_dir=args.features_dir,
-                              subjects=[sub], train=False)
-    clip_projection = test_dataset.visual_projection
+                              subjects=[sub], train=False,
+                              feature_space=args.feature_space,
+                              )
+    if args.feature_space == "cls":
+    # CLS 1280次元を生成用CLIP 1024次元へ変換
+        clip_projection = (
+            test_dataset.visual_projection
+        )
 
-    if clip_projection.shape != (1280, 1024):
-        raise RuntimeError(
-            f"projection shapeが不正です: {clip_projection.shape}"
-    )
+        if (
+            clip_projection is None
+            or tuple(clip_projection.shape)
+            != (1280, 1024)
+        ):
+            raise RuntimeError(
+                "CLS mode requires projection "
+                "shape (1280, 1024), but got "
+                f"{None if clip_projection is None else clip_projection.shape}"
+            )
+
+    else:
+        # CLIP特徴は既に1024次元なので、そのまま通す
+        clip_projection = torch.eye(
+            1024,
+            dtype=torch.float32,
+        )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=0)
     img_features_test_all = test_dataset.img_features
@@ -517,7 +503,7 @@ def main():
     if not args.skip_generation:
         # --- Load encoder ---
         print("Loading ATMS encoder...")
-        eeg_model = ATMS(outputs_dim=1280)
+        eeg_model = ATMS(outputs_dim=feature_dim)
         eeg_model.load_state_dict(torch.load(args.encoder_path, map_location=device))
         eeg_model = eeg_model.to(device)
         eeg_model.eval()
@@ -531,7 +517,7 @@ def main():
 
         # --- Load prior ---
         print("Loading Diffusion Prior...")
-        diffusion_prior = DiffusionPriorUNet(cond_dim=1280, embed_dim=1280, dropout=args.prior_dropout)
+        diffusion_prior = DiffusionPriorUNet(cond_dim=feature_dim,embed_dim=feature_dim,dropout=args.prior_dropout,)
         diffusion_prior.load_state_dict(torch.load(args.prior_path, map_location=device))
         pipe = Pipe(diffusion_prior, device=device)
 
@@ -557,7 +543,6 @@ def main():
                 eeg_features=eeg_features_test,
                 prior_features=prior_embeds,
                 target_features=img_features_test_all,
-                clip_projection=clip_projection,
             )
 
             return

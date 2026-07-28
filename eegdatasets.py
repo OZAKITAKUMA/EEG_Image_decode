@@ -148,7 +148,9 @@ class EEGDataset(Dataset):
                  time_window=None,
                  classes=None,
                  pictures=None,
-                 avg_trials=False):
+                 avg_trials=False,
+                 feature_space="cls",
+                 ):
 
         if time_window is None:
             time_window = [0, 1.0]
@@ -170,6 +172,12 @@ class EEGDataset(Dataset):
         self.classes = classes
         self.pictures = pictures
         self.exclude_subject = exclude_subject
+        if feature_space not in ("clip", "cls"):
+            raise ValueError(
+                f"Unknown feature_space: {feature_space!r}. "
+                "Choose 'clip' or 'cls'."
+            )
+        self.feature_space = feature_space
         self.avg_trials = avg_trials and train
 
         assert any(s in self.subject_list for s in self.subjects), \
@@ -248,11 +256,16 @@ class EEGDataset(Dataset):
                 + ', '.join(_FEATURE_DEFAULTS))
 
     def _load_clip_features(self):
-        fname = (
-            f"{_CLIP_MODEL_TYPE}_preprojection_features_train.pt"
-            if self.train
-            else f"{_CLIP_MODEL_TYPE}_preprojection_features_test.pt"
-        )
+        split = "train" if self.train else "test"
+        if self.feature_space == "cls":
+            fname = (
+                f"{_CLIP_MODEL_TYPE}_"
+                f"preprojection_features_{split}.pt"
+            )
+        else:
+            fname = (
+                f"{_CLIP_MODEL_TYPE}_features_{split}.pt"
+            )
 
         candidates = [
             self.features_path,
@@ -279,7 +292,7 @@ class EEGDataset(Dataset):
             self.visual_projection = saved.get("visual_projection")
 
             # 古いキャッシュにprojectionがない場合だけ追加
-            if self.visual_projection is None:
+            if (self.feature_space == "cls" and self.visual_projection is None):
                 _ensure_clip_loaded()
 
                 self.visual_projection = (
@@ -300,14 +313,15 @@ class EEGDataset(Dataset):
 
             self.text_features = self._encode_text(self.text)
             self.img_features = self._encode_images(self.img)
-
-            self.visual_projection = (
-                _clip_state["model"]
-                .visual.proj
-                .detach()
-                .float()
-                .cpu()
-            )
+            
+            if self.feature_space == "cls":
+                self.visual_projection = (
+                    _clip_state["model"]
+                    .visual.proj
+                    .detach()
+                    .float()
+                    .cpu()
+                )
 
             cache = os.path.join(self.features_dir, fname)
             os.makedirs(self.features_dir, exist_ok=True)
@@ -332,8 +346,10 @@ class EEGDataset(Dataset):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-        print("Image features:", self.img_features.shape)
-        print("Visual projection:", self.visual_projection.shape)
+        print(f"Image features ({self.feature_space}):", self.img_features.shape,)
+
+        if self.visual_projection is not None:
+            print("Visual projection:", self.visual_projection.shape,)
     
     def _load_eeg_and_images(self):
         data_list = []
@@ -706,6 +722,45 @@ class EEGDataset(Dataset):
         model = _clip_state["model"]
         preprocess = _clip_state["preprocess"]
         dev = _clip_state["device"]
+        
+        # CLIP Projection後の1024次元特徴を抽出
+        if self.feature_space == "clip":
+            feats_list = []
+            batch_size = 20
+
+            for i in tqdm(
+                range(0, len(image_paths), batch_size),
+                desc="CLIP projected",
+            ):
+                batch = image_paths[
+                    i:i + batch_size
+                ]
+
+                imgs = torch.stack([
+                    preprocess(
+                        Image.open(path).convert("RGB")
+                    )
+                    for path in batch
+                ]).to(dev)
+
+                with torch.no_grad():
+                    features = model.encode_image(imgs)
+
+                feats_list.append(
+                    features.detach().float().cpu()
+                )
+
+            features = torch.cat(
+                feats_list,
+                dim=0,
+            )
+
+            print(
+                "CLIP features:",
+                features.shape,
+            )
+
+            return features
 
         feats_list = []
 
@@ -778,3 +833,4 @@ class EEGDataset(Dataset):
         img_feats = self.img_features[img_idx]
 
         return x, label, text, text_feats, img, img_feats
+
