@@ -447,6 +447,7 @@ def main():
                         help='Also evaluate encoder-only reconstruction (Stage 1, no prior) '
                              'and print a side-by-side comparison with the full pipeline (Stage 2)')
     parser.add_argument("--cosine_only", action="store_true", help="コサイン類似度だけ計算して画像生成を行わない",)
+    parser.add_argument("--retrieval_only", action="store_true", help="画像検索だけ実行し、Priorと画像生成を行わない",)
     parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
                         help=("Feature space used by the trained encoder and prior"),)
     args = parser.parse_args()
@@ -469,6 +470,7 @@ def main():
                               subjects=[sub], train=False,
                               feature_space=args.feature_space,
                               )
+    
     if args.feature_space == "cls":
     # CLS 1280次元を生成用CLIP 1024次元へ変換
         clip_projection = (
@@ -511,6 +513,35 @@ def main():
         # --- Extract EEG features ---
         print("Extracting EEG features from test set...")
         eeg_features_test = extract_eeg_features(sub, eeg_model, test_loader, device)
+
+        eeg_features_test = (eeg_features_test.float() @ clip_projection.float())
+        img_features_test_all = (img_features_test_all.float() @ clip_projection.float())
+ 
+        # 簡易的な検索タスク実行 # 
+        eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
+        img_norm = F.normalize(img_features_test_all.float(), dim=1)
+
+        similarity = eeg_norm @ img_norm.T
+
+        pred_top1 = similarity.argmax(dim=1)
+        targets = torch.arange(len(eeg_norm))
+
+        top1_acc = (pred_top1 == targets).float().mean()
+
+        top5_indices = similarity.topk(5, dim=1).indices
+        top5_acc = (
+            top5_indices == targets.unsqueeze(1)
+        ).any(dim=1).float().mean()
+
+        print(f"Retrieval Top-1: {top1_acc.item():.4f}")
+        print(f"Retrieval Top-5: {top5_acc.item():.4f}")
+        
+        # 検索タスク終了 #
+        if args.retrieval_only:
+            print("Retrieval-only evaluation finished.")
+            return
+
+        
         print(f"  EEG features shape: {eeg_features_test.shape}")
         del eeg_model
         torch.cuda.empty_cache()

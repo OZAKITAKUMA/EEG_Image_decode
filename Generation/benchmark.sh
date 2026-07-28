@@ -78,7 +78,7 @@ RESUME="${RESUME:-}"
 
 # clip：Projection後の1024次元
 # cls：Projection前のCLS 1280次元
-FEATURE_SPACE="${FEATURE_SPACE:-cls}"
+FEATURE_SPACE="${FEATURE_SPACE:-clip}"
 
 if [ "${FEATURE_SPACE}" != "clip" ] && \
    [ "${FEATURE_SPACE}" != "cls" ]; then
@@ -118,6 +118,8 @@ GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-8}"  # SDXL generation batch size (images per 
 #   Also run Stage-1 generation (encoder embeddings → SDXL, bypassing the prior)
 #   and print a Stage-1 vs Stage-2 comparison table.  Doubles SDXL render time.
 EVAL_ENCODER_RECON="${EVAL_ENCODER_RECON:-true}"
+COSINE_ONLY="${COSINE_ONLY:-false}"
+RETRIEVAL_ONLY="${RETRIEVAL_ONLY:-true}"
 
 #==============================================================================
 # [GPU SETTINGS]
@@ -325,6 +327,14 @@ for SUBJECT in ${SUBJECTS}; do
 
     if [ -n "${IP_ADAPTER_PATH}" ]; then
         EVAL_CMD="${EVAL_CMD} --ip_adapter_path \"${IP_ADAPTER_PATH}\""
+    fi
+
+    if [ "${COSINE_ONLY}" = "true" ]; then
+        EVAL_CMD="${EVAL_CMD} --cosine_only"
+    fi
+
+    if [ "${RETRIEVAL_ONLY}" = "true" ]; then
+        EVAL_CMD="${EVAL_CMD} --retrieval_only"
     fi
 
     eval ${EVAL_CMD}
