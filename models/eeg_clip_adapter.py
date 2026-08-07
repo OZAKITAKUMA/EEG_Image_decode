@@ -9,3 +9,6 @@ class EEGCLIPAdapter(nn.Module):
 
     def forward(self, eeg_cls):
         return eeg_cls.float() @ self.projection
+
+    # EEGのクラストークン埋め込みを学習する層に入れて出力させる
+    # おそらく出力をどこかでロスとる

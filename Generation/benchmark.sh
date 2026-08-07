@@ -78,7 +78,7 @@ RESUME="${RESUME:-}"
 
 # clip：Projection後の1024次元
 # cls：Projection前のCLS 1280次元
-FEATURE_SPACE="${FEATURE_SPACE:-clip}"
+FEATURE_SPACE="${FEATURE_SPACE:-cls}"
 
 if [ "${FEATURE_SPACE}" != "clip" ] && \
    [ "${FEATURE_SPACE}" != "cls" ]; then
@@ -104,6 +104,13 @@ SEED=42
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"  # Average 4 trials/condition into 1 signal
 VAL_RATIO=0.1             # Fraction of training conditions held out for validation
 PATIENCE=50               # Early-stopping patience (both Phase 1 and Phase 2)
+
+# Adapterの有無
+USE_ADAPTER="${USE_ADAPTER:-true}"
+ADAPTER_EPOCHS="${ADAPTER_EPOCHS:-50}"
+ADAPTER_LR="${ADAPTER_LR:-1e-4}"
+ADAPTER_BATCH_SIZE="${ADAPTER_BATCH_SIZE:-1024}"
+ADAPTER_PATIENCE="${ADAPTER_PATIENCE:-10}"
 
 #==============================================================================
 # [EVALUATION HYPERPARAMETERS]
@@ -162,6 +169,7 @@ echo "  Feature space:   ${FEATURE_SPACE}"
 if [ -n "${RESUME}" ]; then
 echo "  RESUME timestamp:${RESUME}  (skip training)"
 fi
+echo "  Adapter:         ${ADAPTER_PATH}"
 echo "  Eval enc recon:  ${EVAL_ENCODER_RECON}"
 echo "  Gen batch size:  ${GEN_BATCH_SIZE}"
 echo "  GPU:             ${GPU}"
@@ -198,6 +206,7 @@ for SUBJECT in ${SUBJECTS}; do
 
         if [ -f "${PATHS_INFO}" ]; then
             ENCODER_PATH=$(grep "encoder_path=" "${PATHS_INFO}" | cut -d= -f2)
+            ADAPTER_PATH=$(grep "adapter_path=" "${PATHS_INFO}" | cut -d= -f2)
             PRIOR_PATH=$(grep "prior_path="   "${PATHS_INFO}" | cut -d= -f2)
         else
             ENCODER_PATH="${MODEL_SAVE_DIR}/encoder/${SUBJECT}/${TIMESTAMP}/best.pth"
@@ -244,7 +253,12 @@ for SUBJECT in ${SUBJECTS}; do
             --save_interval ${SAVE_INTERVAL} \
             --val_ratio ${VAL_RATIO} \
             --patience ${PATIENCE} \
-            --feature_space ${FEATURE_SPACE}"
+            --feature_space ${FEATURE_SPACE} \
+            --adapter_epochs ${ADAPTER_EPOCHS} \
+            --adapter_lr ${ADAPTER_LR} \
+            --adapter_batch_size ${ADAPTER_BATCH_SIZE} \
+            --adapter_patience ${ADAPTER_PATIENCE} 
+            "
 
         # Only override the shared feature cache when an explicit path is given
         if [ -n "${FEATURES_DIR}" ]; then
@@ -257,6 +271,10 @@ for SUBJECT in ${SUBJECTS}; do
 
         if [ "${AVG_SIGNAL_TRAINING}" = true ]; then
             TRAIN_CMD="${TRAIN_CMD} --avg_trials"
+        fi
+
+        if [ "${USE_ADAPTER}" = true ]; then
+            TRAIN_CMD="${TRAIN_CMD} --train_adapter"
         fi
 
         eval ${TRAIN_CMD}
@@ -276,6 +294,7 @@ for SUBJECT in ${SUBJECTS}; do
         fi
 
         ENCODER_PATH=$(grep "encoder_path=" "${PATHS_INFO}" | cut -d= -f2)
+        ADAPTER_PATH=$(grep "adapter_path=" "${PATHS_INFO}" | cut -d= -f2)
         PRIOR_PATH=$(grep "prior_path="   "${PATHS_INFO}" | cut -d= -f2)
         TIMESTAMP=$(grep  "timestamp="    "${PATHS_INFO}" | cut -d= -f2)
         EVAL_OUTPUT_DIR="${OUTPUT_DIR}/${SUBJECT}/${TIMESTAMP}"
@@ -294,23 +313,24 @@ for SUBJECT in ${SUBJECTS}; do
     echo ""
 
     EVAL_CMD="python evaluate.py \
-        --data_path \"${DATA_PATH}\" \
-        --img_directory_test \"${IMG_DIR_TEST}\" \
-        --img_dir_training \"${IMG_DIR_TRAINING}\" \
-        --output_dir \"${EVAL_OUTPUT_DIR}\" \
-        --encoder_path \"${ENCODER_PATH}\" \
-        --prior_path \"${PRIOR_PATH}\" \
-        --subject \"${SUBJECT}\" \
-        --batch_size ${PRIOR_BATCH_SIZE} \
-        --num_gen_per_class ${NUM_GEN_PER_CLASS} \
-        --prior_steps ${PRIOR_INFERENCE_STEPS} \
-        --guidance_scale ${GUIDANCE_SCALE} \
-        --sdxl_steps ${SDXL_INFERENCE_STEPS} \
-        --gen_batch_size ${GEN_BATCH_SIZE} \
-        --prior_dropout ${PRIOR_DROPOUT} \
-        --feature_space ${FEATURE_SPACE} \
-        --gpu \"${GPU}\" \
-        --seed ${SEED}"
+    --data_path \"${DATA_PATH}\" \
+    --img_directory_test \"${IMG_DIR_TEST}\" \
+    --img_dir_training \"${IMG_DIR_TRAINING}\" \
+    --output_dir \"${EVAL_OUTPUT_DIR}\" \
+    --encoder_path \"${ENCODER_PATH}\" \
+    --adapter_path \"${ADAPTER_PATH}\" \
+    --prior_path \"${PRIOR_PATH}\" \
+    --subject \"${SUBJECT}\" \
+    --batch_size ${PRIOR_BATCH_SIZE} \
+    --num_gen_per_class ${NUM_GEN_PER_CLASS} \
+    --prior_steps ${PRIOR_INFERENCE_STEPS} \
+    --guidance_scale ${GUIDANCE_SCALE} \
+    --sdxl_steps ${SDXL_INFERENCE_STEPS} \
+    --gen_batch_size ${GEN_BATCH_SIZE} \
+    --prior_dropout ${PRIOR_DROPOUT} \
+    --feature_space ${FEATURE_SPACE} \
+    --gpu \"${GPU}\" \
+    --seed ${SEED}"
 
     # Only override the shared feature cache when an explicit path is given
     if [ -n "${FEATURES_DIR}" ]; then
@@ -336,8 +356,13 @@ for SUBJECT in ${SUBJECTS}; do
     if [ "${RETRIEVAL_ONLY}" = "true" ]; then
         EVAL_CMD="${EVAL_CMD} --retrieval_only"
     fi
+    
+    if [ "${USE_ADAPTER}" = true ]; then
+        EVAL_CMD="${EVAL_CMD} --use_adapter"
+    fi
 
-    eval ${EVAL_CMD}
+    echo "[DEBUG] ${EVAL_CMD}"
+    eval "${EVAL_CMD}"
     EVAL_STATUS=$?
 
     if [ ${EVAL_STATUS} -ne 0 ]; then
@@ -350,13 +375,19 @@ for SUBJECT in ${SUBJECTS}; do
     COMPLETED_SUBJECTS+=("${SUBJECT}")
     STAGE2_CSV="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}.csv"
     STAGE2_CSV_FILES+=("${STAGE2_CSV}")
-
+    
     if [ "${EVAL_ENCODER_RECON}" = true ]; then
-        STAGE1_CSV="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+        if [ "${USE_ADAPTER}" = true ]; then
+            STAGE1_CSV="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only_adapter.csv"
+        else
+            STAGE1_CSV="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+        fi
+
         if [ -f "${STAGE1_CSV}" ]; then
             STAGE1_CSV_FILES+=("${STAGE1_CSV}")
         fi
     fi
+      
 
     echo ""
     echo "  [INFO] ${SUBJECT} complete."

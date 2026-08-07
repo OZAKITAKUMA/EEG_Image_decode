@@ -33,12 +33,14 @@ import pandas as pd
 from skimage.color import rgb2gray
 from skimage.metrics import structural_similarity as ssim_func
 
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from eegdatasets import EEGDataset
 from diffusion_prior import DiffusionPriorUNet, Pipe
 from models.atms import ATMS, extract_id_from_string
 from pipeline import Generator4Embeds
+from models.eeg_clip_adapter import EEGCLIPAdapter
 
 
 def extract_eeg_features(sub, eeg_model, dataloader, device):
@@ -113,9 +115,9 @@ def load_test_texts(img_directory_test):
 
 def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub, clip_projection,
                                  num_gen_per_class=10, device='cuda',
-                                 gen_batch_size=1):
+                                 gen_batch_size=1, output_folder="generated_imgs_encoder_only",):
     """Generate images directly from EEG encoder output, skipping the diffusion prior (Stage 1)."""
-    gen_dir = os.path.join(output_dir, 'generated_imgs_encoder_only', sub)
+    gen_dir = os.path.join(output_dir, output_folder, sub)
     if os.path.isdir(gen_dir):
         shutil.rmtree(gen_dir)
     os.makedirs(gen_dir)
@@ -450,7 +452,21 @@ def main():
     parser.add_argument("--retrieval_only", action="store_true", help="画像検索だけ実行し、Priorと画像生成を行わない",)
     parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
                         help=("Feature space used by the trained encoder and prior"),)
+    parser.add_argument("--adapter_path", type=str, default=None,)
+    parser.add_argument("--use_adapter", action="store_true",)
     args = parser.parse_args()
+
+    if args.use_adapter:
+        if args.feature_space != "cls":
+            raise ValueError(
+                "--use_adapterには"
+                "--feature_space clsが必要です"
+            )
+
+        if args.adapter_path is None:
+            raise ValueError(
+                "--adapter_pathを指定してください"
+            )
 
     feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
@@ -512,10 +528,58 @@ def main():
 
         # --- Extract EEG features ---
         print("Extracting EEG features from test set...")
-        eeg_features_test = extract_eeg_features(sub, eeg_model, test_loader, device)
+        # eeg_features_test = extract_eeg_features(sub, eeg_model, test_loader, device)
 
-        eeg_features_test = (eeg_features_test.float() @ clip_projection.float())
-        img_features_test_all = (img_features_test_all.float() @ clip_projection.float())
+        # eeg_features_test = (eeg_features_test.float() @ clip_projection.float())
+        # img_features_test_all = (img_features_test_all.float() @ clip_projection.float())
+
+        # Encoder・Priorが使用する生のCLS特徴
+        eeg_features_native = extract_eeg_features(
+            sub,
+            eeg_model,
+            test_loader,
+            device,
+        ).float()
+
+        img_features_native = (
+            test_dataset.img_features.float()
+        )
+
+        if args.use_adapter:
+            print("Loading EEG CLS -> CLIP Adapter...")
+
+            adapter = EEGCLIPAdapter(clip_projection)
+
+            adapter.load_state_dict(
+                torch.load(args.adapter_path, map_location=device,))
+            adapter = adapter.to(device)
+            adapter.eval()
+
+            # Encoder-only生成で使用する1024次元特徴
+            with torch.no_grad():
+                encoder_generation_features = adapter(
+                    eeg_features_native.to(device)
+                ).cpu()
+
+            # すでに1024次元なので、後段では変換しない
+            encoder_generation_projection = torch.eye(
+                1024,
+                dtype=torch.float32,
+            )
+
+        else:
+            # 従来の固定visual.projを使用
+            encoder_generation_features = (
+                eeg_features_native
+            )
+
+            encoder_generation_projection = (
+                clip_projection
+            )
+
+        # Prior側はAdapterを通さず、CLS 1280次元のまま
+        eeg_features_test = eeg_features_native
+        img_features_test_all = img_features_native
  
         # 簡易的な検索タスク実行 # 
         eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
@@ -589,13 +653,22 @@ def main():
 
         # --- Stage 1: encoder-only generation (optional) ---
         if args.eval_encoder_recon:
+            if args.use_adapter:
+                encoder_output_folder = (
+                    "generated_imgs_encoder_only_adapter"
+                )
+            else:
+                encoder_output_folder = (
+                    "generated_imgs_encoder_only"
+                )
             enc_gen_dir = generate_images_encoder_only(
-                eeg_features_test, generator, texts,
+                encoder_generation_features, generator, texts,
                 args.output_dir, sub,
-                clip_projection=clip_projection,
+                clip_projection=encoder_generation_projection,
                 num_gen_per_class=args.num_gen_per_class,
                 device=device,
                 gen_batch_size=args.gen_batch_size,
+                output_folder=encoder_output_folder,
             )
 
         # --- Stage 2: full pipeline generation (encoder → prior → SDXL) ---
@@ -673,9 +746,19 @@ def main():
             "Mean": [f"{v:.4f}" for v in enc_metrics.values()],
             "Std": [f"{enc_stds[k]:.4f}" for k in enc_metrics.keys()],
         })
-        enc_results_path = os.path.join(args.output_dir, f'reconstruction_metrics_{sub}_encoder_only.csv')
+
+        if args.use_adapter:
+            encoder_suffix = "encoder_only_adapter"
+        else:
+            encoder_suffix = "encoder_only"
+
+        enc_results_path = os.path.join(
+            args.output_dir,
+            f"reconstruction_metrics_{sub}_{encoder_suffix}.csv",
+        )
         enc_df.to_csv(enc_results_path, sep='\t', index=False)
         print(f"\nEncoder-only metrics saved to: {enc_results_path}")
+
     else:
         print("\n" + "=" * 50)
         print("RECONSTRUCTION METRICS SUMMARY")

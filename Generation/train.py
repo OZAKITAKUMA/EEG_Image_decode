@@ -27,13 +27,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from eegdatasets import EEGDataset
 from diffusion_prior import DiffusionPriorUNet, EmbeddingDataset, Pipe
 from models.atms import ATMS, extract_id_from_string
+from models.eeg_clip_adapter import EEGCLIPAdapter
 
 # Shared encoder training utilities (generation loss mode: MSE + CLIP)
 from encoder_utils import (
@@ -131,6 +132,97 @@ def validate_prior_one_epoch(pipe, dataloader, seed=42,):
 
     return loss_sum / total_elements
 
+def train_adapter_one_epoch(adapter, dataloader, optimizer, device):
+    # EEG cls tokenをCLIPに埋め込むためのprojをfine-tuning
+    adapter.train()
+    total_loss = 0.0
+
+    for eeg_cls, image_clip in dataloader:
+        eeg_cls = eeg_cls.to(device)
+        image_clip = image_clip.to(device)
+
+        # eegから作られたclip埋め込み
+        predicted = adapter(eeg_cls)
+        # 画像から作られた埋め込みとlossをとる
+        loss = compute_adapter_loss(predicted, image_clip,)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+@torch.no_grad()
+def validate_adapter(adapter, dataloader, device,):
+    adapter.eval()
+    total_loss = 0.0
+
+    for eeg_cls, image_clip in dataloader:
+        eeg_cls = eeg_cls.to(device)
+        image_clip = image_clip.to(device)
+
+        predicted = adapter(eeg_cls)
+
+        loss = compute_adapter_loss(predicted, image_clip,)
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+def fit_adapter(adapter, train_eeg_cls, train_image_clip, val_eeg_cls, val_image_clip,
+                save_path, device, args):
+
+    # 教師; CLIPの特徴(1024次元) 予測:train_eeg_cls @ learnable_proj.(Adapter)
+    train_dataset = TensorDataset(train_eeg_cls, train_image_clip,)
+    val_dataset = TensorDataset(val_eeg_cls, val_image_clip)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.adapter_batch_size, shuffle=True,)
+    val_loader = DataLoader(val_dataset, batch_size=args.adapter_batch_size, shuffle=False)
+
+    optimizer = AdamW(adapter.parameters(), lr=args.adapter_lr)
+
+    best_val_loss = float("inf")
+    patience_counter = 0
+
+    for epoch in range(args.adapter_epochs):
+        train_loss = train_adapter_one_epoch(adapter, train_loader, optimizer, device,)
+        val_loss = validate_adapter(adapter, val_loader, device,)
+
+        print(
+            f"[Adapter] "
+            f"Epoch {epoch + 1}/{args.adapter_epochs} "
+            f"| Train L={train_loss:.6f} "
+            f"| Val L={val_loss:.6f}"
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+
+            torch.save(adapter.state_dict(), save_path)
+
+            print(
+                f"  ★ New best Adapter: "
+                f"val_loss={best_val_loss:.6f}"
+            )
+        else:
+            patience_counter += 1
+
+        if patience_counter >= args.adapter_patience:
+            print("[Adapter Early Stop]")
+            break
+
+    # 最もvalidation lossが小さかった重みを戻す
+    adapter.load_state_dict(
+        torch.load(save_path, map_location=device,))
+
+    adapter.eval()
+
+    for parameter in adapter.parameters():
+        parameter.requires_grad = False
+
 
 def setup_prior_optimizer(pipe, dataloader, num_epochs, learning_rate):
     from diffusers.optimization import get_cosine_schedule_with_warmup
@@ -162,6 +254,21 @@ def extract_features_ordered(sub, eeg_model, dataloader, device):
             img_list.append(img_features.cpu())
     return torch.cat(eeg_list, 0), torch.cat(img_list, 0)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Adapter Loss Function
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_adapter_loss(predicted, target):
+    """
+    predicted: Adapterを通したEEG特徴 (B, 1024)
+    target:    画像のCLIP特徴       (B, 1024)
+    """
+    mse_loss = nn.functional.mse_loss(predicted,target,)
+
+    cosine_loss = 1.0 - nn.functional.cosine_similarity(predicted, target, dim=1,).mean()
+
+    total_loss = mse_loss + cosine_loss
+
+    return total_loss
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -200,17 +307,24 @@ def main():
     parser.add_argument('--avg_trials', action='store_true',
                         help='Average the 4 trials per condition into one signal '
                              'before training (reduces noise, shrinks dataset 4x).')
-    parser.add_argument(
-    "--feature_space",
-    choices=["clip", "cls"],
-    default="cls",
-    help=(
-        "Image feature space: "
-        "'clip'=1024-D projected CLIP, "
-        "'cls'=1280-D pre-projection CLS"
-    ),
-)
+    parser.add_argument("--train_adapter", action="store_true", help="Encoder学習後にAdapterを学習する",)
+    parser.add_argument("--adapter_epochs", type=int, default=50,)
+    parser.add_argument("--adapter_lr",type=float,default=1e-4,)
+    parser.add_argument("--adapter_batch_size",type=int,default=1024,)
+    parser.add_argument("--adapter_patience", type=int,default=10,)
+    parser.add_argument("--feature_space",choices=["clip", "cls"],default="cls",
+                        help=("Image feature space: ""'clip'=1024-D projected CLIP, ""'cls'=1280-D pre-projection CLS"),)
     args = parser.parse_args()
+
+    if args.train_adapter and args.feature_space != "cls":
+        raise ValueError(
+            "Adapter学習には--feature_space clsが必要です"
+        )
+
+    if args.train_adapter and args.encoder_finetuning:
+        raise ValueError(
+            "Adapter学習時はencoder_finetuningを無効にしてください"
+        )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -284,16 +398,40 @@ def main():
     eeg_model.to(device)
     encoder_optimizer = AdamW(eeg_model.parameters(), lr=args.lr_encoder)
 
+    adapter = None
+
+    # Adapterのfine-tuning 
+    if args.train_adapter:
+        # Image Encoderのprojection層を読み込み
+        visual_projection = full_train_dataset.visual_projection
+
+        if visual_projection is None:
+            raise RuntimeError("visual_projectionが読み込まれていません")
+
+        print("Visual projection:", visual_projection.shape,)
+        # 期待する形：(1280, 1024)
+
+        adapter = EEGCLIPAdapter(visual_projection).to(device)
+
+
     diffusion_prior = DiffusionPriorUNet(cond_dim=feature_dim, embed_dim=feature_dim, dropout=args.prior_dropout,)
     pipe = Pipe(diffusion_prior, device=device)
 
     # ── Directories ──────────────────────────────────────────────────────
     encoder_save_dir = os.path.join(args.model_save_dir, 'encoder', sub, current_time)
+    adapter_save_dir = os.path.join(args.model_save_dir, "adapter", sub, current_time)
     prior_save_dir = os.path.join(args.model_save_dir, 'prior', sub, current_time)
     results_dir = os.path.join(args.output_dir, sub, current_time)
     os.makedirs(encoder_save_dir, exist_ok=True)
     os.makedirs(prior_save_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
+    if args.train_adapter:
+        os.makedirs(adapter_save_dir, exist_ok=True)
+
+    adapter_best_path = ""
+
+    if args.train_adapter:
+        adapter_best_path = os.path.join(adapter_save_dir, "best.pth")
 
     # ── Training loop ────────────────────────────────────────────────────
     results = []
@@ -316,6 +454,7 @@ def main():
             continue
 
         # ── Phase transition ──
+        # このif文は一回だけ入る
         if is_prior_phase and not phase2_started:
             best_enc_file = os.path.join(encoder_save_dir, 'best.pth')
             if os.path.exists(best_enc_file):
@@ -327,6 +466,65 @@ def main():
                     param.requires_grad = False
                 eeg_model.eval()
                 encoder_frozen = True
+
+            if args.train_adapter:
+                print("\n===== Phase 1.5: Adapter training =====")
+
+                # 最良Encoderを通してEEG CLS・画像CLSを一度だけ取得
+                train_eeg_cls, train_image_cls = (
+                    extract_features_ordered(
+                        sub,
+                        eeg_model,
+                        train_loader_ordered,
+                        device,
+                    )
+                )
+
+                val_eeg_cls, val_image_cls = (
+                    extract_features_ordered(
+                        sub,
+                        eeg_model,
+                        val_loader,
+                        device,
+                    )
+                )
+
+                print(
+                    "Train EEG CLS:",
+                    train_eeg_cls.shape,
+                )
+                print(
+                    "Train Image CLS:",
+                    train_image_cls.shape,
+                )
+
+                # 正解画像側だけ、凍結CLIP Projectionを通す
+                train_image_clip = (
+                    train_image_cls.float()
+                    @ visual_projection.float()
+                )
+
+                val_image_clip = (
+                    val_image_cls.float()
+                    @ visual_projection.float()
+                )
+
+                fit_adapter(
+                    adapter=adapter,
+                    train_eeg_cls=train_eeg_cls,
+                    train_image_clip=train_image_clip,
+                    val_eeg_cls=val_eeg_cls,
+                    val_image_clip=val_image_clip,
+                    save_path=adapter_best_path,
+                    device=device,
+                    args=args,
+                )
+
+                print(
+                    "[INFO] Adapter training finished:",
+                    adapter_best_path,
+                )
+            
 
             phase2_started = True
             patience_counter = 0
@@ -506,6 +704,8 @@ def main():
     print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
     print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
     print(f"  Encoder: {best_encoder_path}")
+    if args.train_adapter:
+        print(f"  Adapter: {adapter_best_path}")
     print(f"  Prior:   {best_prior_path}")
     print(f"{'='*55}")
 
@@ -525,6 +725,7 @@ def main():
     info_path = os.path.join(results_dir, 'paths_info.txt')
     with open(info_path, 'w') as f:
         f.write(f"encoder_path={best_encoder_path}\n")
+        f.write(f"adapter_path={adapter_best_path}\n")
         f.write(f"prior_path={best_prior_path}\n")
         f.write(f"subject={sub}\n")
         f.write(f"timestamp={current_time}\n")
