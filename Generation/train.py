@@ -332,6 +332,14 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+    torch.use_deterministic_algorithms(True)
+
     device = torch.device(args.gpu if torch.cuda.is_available() else 'cpu')
     sub = args.subject
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
