@@ -304,6 +304,9 @@ def main():
                         help='Early stopping patience (epochs without val improvement)')
     parser.add_argument('--encoder_finetuning', action='store_true',
                         help='If set, encoder keeps training jointly with prior in Phase 2')
+    parser.add_argument('--encoder_only', action='store_true',
+                        help='Train only the EEG encoder for --total_epochs; '
+                             'do not create, train, or save a Diffusion Prior')
     parser.add_argument('--avg_trials', action='store_true',
                         help='Average the 4 trials per condition into one signal '
                              'before training (reduces noise, shrinks dataset 4x).')
@@ -326,6 +329,16 @@ def main():
             "Adapter学習時はencoder_finetuningを無効にしてください"
         )
 
+    if args.encoder_only and args.train_adapter:
+        raise ValueError(
+            "--encoder_onlyではAdapterを学習しません"
+        )
+
+    if args.encoder_only and args.encoder_finetuning:
+        raise ValueError(
+            "--encoder_onlyと--encoder_finetuningは同時に指定できません"
+        )
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -344,7 +357,11 @@ def main():
     sub = args.subject
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
-    encoder_only_epochs = int(args.total_epochs * args.encoder_only_ratio)
+    encoder_only_epochs = (
+        args.total_epochs
+        if args.encoder_only
+        else int(args.total_epochs * args.encoder_only_ratio)
+    )
     feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     # ── Data ─────────────────────────────────────────────────────────────
@@ -390,8 +407,12 @@ def main():
 
     print(f"=== Training Schedule ===")
     print(f"  Total epochs:    {args.total_epochs} (max)")
-    print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
-    print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
+    if args.encoder_only:
+        print(f"  Mode:            Encoder-only (Diffusion Prior disabled)")
+        print(f"  Encoder:         epoch 1 ~ {encoder_only_epochs}")
+    else:
+        print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
+        print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
     print(f"  Encoder finetuning: {finetune}")
     print(f"  Feature space:   "f"{args.feature_space}")
     print(f"  Feature dim:     "f"{feature_dim}")
@@ -422,8 +443,14 @@ def main():
         adapter = EEGCLIPAdapter(visual_projection).to(device)
 
 
-    diffusion_prior = DiffusionPriorUNet(cond_dim=feature_dim, embed_dim=feature_dim, dropout=args.prior_dropout,)
-    pipe = Pipe(diffusion_prior, device=device)
+    pipe = None
+    if not args.encoder_only:
+        diffusion_prior = DiffusionPriorUNet(
+            cond_dim=feature_dim,
+            embed_dim=feature_dim,
+            dropout=args.prior_dropout,
+        )
+        pipe = Pipe(diffusion_prior, device=device)
 
     # ── Directories ──────────────────────────────────────────────────────
     encoder_save_dir = os.path.join(args.model_save_dir, 'encoder', sub, current_time)
@@ -431,7 +458,8 @@ def main():
     prior_save_dir = os.path.join(args.model_save_dir, 'prior', sub, current_time)
     results_dir = os.path.join(args.output_dir, sub, current_time)
     os.makedirs(encoder_save_dir, exist_ok=True)
-    os.makedirs(prior_save_dir, exist_ok=True)
+    if not args.encoder_only:
+        os.makedirs(prior_save_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
     if args.train_adapter:
         os.makedirs(adapter_save_dir, exist_ok=True)
@@ -455,10 +483,15 @@ def main():
     phase2_started = False
 
     for epoch in range(args.total_epochs):
-        is_prior_phase = epoch >= encoder_only_epochs
+        is_prior_phase = (
+            not args.encoder_only
+            and epoch >= encoder_only_epochs
+        )
 
         # Skip remaining phase 1 epochs if encoder already early-stopped
         if not is_prior_phase and encoder_done:
+            if args.encoder_only:
+                break
             continue
 
         # ── Phase transition ──
@@ -689,6 +722,9 @@ def main():
             if not is_prior_phase:
                 print(f"\n[Early Stop] No encoder improvement for {args.patience} epochs. "
                       f"Best encoder epoch = {best_encoder_epoch}.")
+                if args.encoder_only:
+                    print("[INFO] Encoder-only training finished by early stopping.")
+                    break
                 encoder_done = True
                 print("[INFO] Skipping to Phase 2...")
             else:
@@ -699,9 +735,11 @@ def main():
                 break
 
     # ── Ensure best checkpoints exist ─────────────────────────────────
-    best_prior_path = os.path.join(prior_save_dir, 'best.pth')
-    if not os.path.exists(best_prior_path):
-        torch.save(pipe.diffusion_prior.state_dict(), best_prior_path)
+    best_prior_path = ""
+    if not args.encoder_only:
+        best_prior_path = os.path.join(prior_save_dir, 'best.pth')
+        if not os.path.exists(best_prior_path):
+            torch.save(pipe.diffusion_prior.state_dict(), best_prior_path)
 
     best_encoder_path = os.path.join(encoder_save_dir, 'best.pth')
     if not os.path.exists(best_encoder_path):
@@ -710,11 +748,13 @@ def main():
     print(f"\n{'='*55}")
     print(f"Training finished at epoch {epoch+1}")
     print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
-    print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
+    if not args.encoder_only:
+        print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
     print(f"  Encoder: {best_encoder_path}")
     if args.train_adapter:
         print(f"  Adapter: {adapter_best_path}")
-    print(f"  Prior:   {best_prior_path}")
+    if not args.encoder_only:
+        print(f"  Prior:   {best_prior_path}")
     print(f"{'='*55}")
 
     # ── Save training log ────────────────────────────────────────────────
@@ -744,6 +784,7 @@ def main():
         f.write(f"best_prior_val_loss={best_prior_val_loss:.4f}\n")
         f.write(f"feature_space="f"{args.feature_space}\n")
         f.write(f"feature_dim="f"{feature_dim}\n")
+        f.write(f"encoder_only={str(args.encoder_only).lower()}\n")
     print(f"Paths info:   {info_path}")
 
 

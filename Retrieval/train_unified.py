@@ -61,7 +61,7 @@ _pkg_parent = os.path.dirname(_eeg_dir)                    # .../visual
 sys.path.insert(0, _pkg_parent)   # enables:  from EEG_Image_decode.eegdatasets import ...
 sys.path.insert(0, _eeg_dir)      # enables:  from encoder_utils import ...
 
-from EEG_Image_decode.eegdatasets import EEGDataset
+from EEG_Image_decode_develop.eegdatasets import EEGDataset
 from encoder_utils import stratified_condition_split
 from eeg_encoders import (
     build_encoder, ENCODER_REGISTRY, SUBJECT_ID_ENCODERS, NORMALIZE_FEAT_ENCODERS
