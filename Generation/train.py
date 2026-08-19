@@ -479,26 +479,46 @@ def main():
     finetune = args.encoder_finetuning
     phase2_desc = "encoder + prior jointly" if finetune else "encoder frozen, prior only"
 
-    print(f"=== Training Schedule ===")
-    print(f"  Total epochs:    {args.total_epochs} (max)")
+    print("=== Training Schedule ===")
+    print(f"  Total epochs:      {args.total_epochs} (max)")
+
     if args.encoder_only:
-        print(f"  Mode:            Encoder-only (Diffusion Prior disabled)")
-        print(f"  Encoder:         epoch 1 ~ {encoder_only_epochs}")
+        print("  Mode:              Encoder-only (Diffusion Prior disabled)")
+        print(f"  Encoder:           epoch 1 ~ {encoder_only_epochs}")
     else:
-        print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
-        print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
-    print(f"  Encoder finetuning: {finetune}")
-    print(f"  Feature space:   "f"{args.feature_space}")
-    print(f"  Feature dim:     "f"{feature_dim}")
-    print(f"  Encoder finetuning: {finetune}")
-    print(f"  Feature space:   "f"{args.feature_space}")
-    print(f"  Feature dim:     "f"{feature_dim}")
-    print(f"  Subject:         {sub}")
-    print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
-    print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
-    print(f"  Val samples:     {len(val_indices)}  ({len(val_indices)/len(full_train_dataset)*100:.0f}%)")
-    print(f"  Early stopping:  patience = {args.patience} epochs")
-    print(f"========================")
+        print(
+            f"  Phase 1 (encoder): epoch 1 ~ {encoder_only_epochs} "
+            "[encoder trains, prior frozen]"
+        )
+        print(
+            f"  Phase 2:           epoch {encoder_only_epochs + 1} "
+            f"~ {args.total_epochs} [{phase2_desc}]"
+        )
+
+    print(f"  Encoder finetuning:{finetune}")
+    print(f"  Feature space:     {args.feature_space}")
+    print(f"  Feature dim:       {feature_dim}")
+    print(f"  Target subject:    {sub}")
+    print(f"  Train subjects:    {', '.join(train_subjects)}")
+    print(f"  Excluded subject:  {args.exclude_subject}")
+    print(
+        "  Subject ID:       "
+        + (
+            "disabled (shared token)"
+            if args.no_subject_id
+            else "enabled"
+        )
+    )
+    print(
+        f"  Train samples:     {len(train_indices)} "
+        f"({len(train_indices) / len(full_train_dataset) * 100:.0f}%)"
+    )
+    print(
+        f"  Val samples:       {len(val_indices)} "
+        f"({len(val_indices) / len(full_train_dataset) * 100:.0f}%)"
+    )
+    print(f"  Early stopping:    patience = {args.patience} epochs")
+    print("========================")
 
     # ── Models ───────────────────────────────────────────────────────────
     eeg_model = ATMS(outputs_dim=feature_dim)
