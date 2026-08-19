@@ -32,8 +32,8 @@ FEATURES_DIR="${FEATURES_DIR:-}"
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
 # Keep encoder-only artifacts separate from the original benchmark.
-MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only}"
+MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only_loso_idfree}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only_loso_idfree}"
 
 #==============================================================================
 # Experiment settings
