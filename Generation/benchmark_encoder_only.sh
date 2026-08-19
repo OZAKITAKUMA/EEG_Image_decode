@@ -38,7 +38,20 @@ OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only}"
 #==============================================================================
 # Experiment settings
 #==============================================================================
-SUBJECTS="${SUBJECTS:-sub-01}"
+ALL_SUBJECTS=(
+    sub-01
+    sub-02
+    sub-03
+    sub-04
+    sub-05
+    sub-06
+    sub-07
+    sub-08
+    sub-09
+    sub-10
+)
+# 除外被験者(test用)
+SUBJECTS="${SUBJECTS:-sub-08}"
 RESUME="${RESUME:-}"
 
 ENCODER_EPOCHS="${ENCODER_EPOCHS:-100}"
@@ -76,7 +89,9 @@ cd "${SCRIPT_DIR}"
 echo "============================================================"
 echo "  ATMS Encoder-only EEG-to-Image Benchmark"
 echo "============================================================"
-echo "  Subjects:        ${SUBJECTS}"
+echo "  Held-out subjects: ${SUBJECTS}"
+echo "  Training mode:     LOSO (9 train / 1 test)"
+echo "  Subject ID:        disabled (shared token)"
 echo "  Data path:       ${DATA_PATH}"
 echo "  Encoder epochs:  ${ENCODER_EPOCHS} (max)"
 echo "  Feature space:   ${FEATURE_SPACE}"
@@ -98,11 +113,26 @@ METRIC_FILES=()
 set +e
 
 for SUBJECT in ${SUBJECTS}; do
+    TRAIN_SUBJECTS=()
+
+    for CANDIDATE_SUBJECT in "${ALL_SUBJECTS[@]}"; do
+        if [ "${CANDIDATE_SUBJECT}" != "${SUBJECT}" ]; then
+            TRAIN_SUBJECTS+=("${CANDIDATE_SUBJECT}")
+        fi
+    done
+
+    if [ "${#TRAIN_SUBJECTS[@]}" -ne 9 ]; then
+        echo "[ERROR] Expected 9 training subjects, got ${#TRAIN_SUBJECTS[@]}."
+        continue
+    fi
+
     echo ""
     echo "############################################################"
-    echo "  Subject: ${SUBJECT}"
+    echo "  Held-out subject: ${SUBJECT}"
+    echo "  Train subjects:   ${TRAIN_SUBJECTS[*]}"
+    echo "  Subject ID:       disabled (shared token)"
     echo "############################################################"
-
+        
     if [ -n "${RESUME}" ]; then
         TIMESTAMP="${RESUME}"
         EVAL_OUTPUT_DIR="${OUTPUT_DIR}/${SUBJECT}/${TIMESTAMP}"
@@ -128,6 +158,9 @@ for SUBJECT in ${SUBJECTS}; do
             --output_dir "${OUTPUT_DIR}"
             --model_save_dir "${MODEL_SAVE_DIR}"
             --subject "${SUBJECT}"
+            --train_subjects "${TRAIN_SUBJECTS[@]}"
+            --exclude_subject "${SUBJECT}"
+            --no_subject_id
             --total_epochs "${ENCODER_EPOCHS}"
             --batch_size "${BATCH_SIZE}"
             --lr_encoder "${LR_ENCODER}"
@@ -181,6 +214,7 @@ for SUBJECT in ${SUBJECTS}; do
         --output_dir "${EVAL_OUTPUT_DIR}"
         --encoder_path "${ENCODER_PATH}"
         --subject "${SUBJECT}"
+        --no_subject_id
         --num_gen_per_class "${NUM_GEN_PER_CLASS}"
         --sdxl_steps "${SDXL_INFERENCE_STEPS}"
         --gen_batch_size "${GEN_BATCH_SIZE}"

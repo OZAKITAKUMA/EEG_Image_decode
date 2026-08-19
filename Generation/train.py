@@ -490,7 +490,11 @@ def main():
     print(f"  Encoder finetuning: {finetune}")
     print(f"  Feature space:   "f"{args.feature_space}")
     print(f"  Feature dim:     "f"{feature_dim}")
+    print(f"  Encoder finetuning: {finetune}")
+    print(f"  Feature space:   "f"{args.feature_space}")
+    print(f"  Feature dim:     "f"{feature_dim}")
     print(f"  Subject:         {sub}")
+    print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
     print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
     print(f"  Val samples:     {len(val_indices)}  ({len(val_indices)/len(full_train_dataset)*100:.0f}%)")
     print(f"  Early stopping:  patience = {args.patience} epochs")
@@ -663,6 +667,7 @@ def main():
                 sub, eeg_model, train_loader, encoder_optimizer, device,
                 img_features_per_class,
                 loss_mode='generation', alpha=0.90,
+                use_subject_id=not args.no_subject_id,
             )
 
         # 2. Phase 2: extract features & train prior
@@ -711,7 +716,8 @@ def main():
         # 3. Evaluate on VALIDATION set (never test set)
         val_loss, val_acc = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
-            k=200, loss_mode='generation', alpha=0.99)
+            k=200, loss_mode='generation', alpha=0.99,
+            use_subject_id=not args.no_subject_id,)
 
         # 4. Logging
         epoch_results = {

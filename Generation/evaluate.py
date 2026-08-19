@@ -43,15 +43,24 @@ from pipeline import Generator4Embeds
 from models.eeg_clip_adapter import EEGCLIPAdapter
 
 
-def extract_eeg_features(sub, eeg_model, dataloader, device):
+def extract_eeg_features(sub, eeg_model, dataloader, device, use_subject_id=True,):
     """Extract EEG features from the model for all test samples."""
     eeg_model.eval()
     features_list = []
+    if use_subject_id:
+        subject_id = extract_id_from_string(sub)
+    else:
+        embedding_layer = (
+            eeg_model.encoder
+            .enc_embedding
+            .subject_embedding
+            .subject_embedding
+        )
+        subject_id = embedding_layer.num_embeddings
     with torch.no_grad():
         for batch_idx, (eeg_data, labels, text, text_features, img, img_features) in enumerate(dataloader):
             eeg_data = eeg_data.to(device)
             batch_size = eeg_data.size(0)
-            subject_id = extract_id_from_string(sub)
             subject_ids = torch.full((batch_size,), subject_id, dtype=torch.long).to(device)
             eeg_features = eeg_model(eeg_data, subject_ids)
             features_list.append(eeg_features.detach().cpu())
@@ -431,6 +440,7 @@ def main():
                         help='Local path to IP-Adapter root directory (contains sdxl_models/). '
                              'Defaults to /vePFS-0x0d/visual/dataset/pretrained/ip-adapter')
     parser.add_argument('--subject', type=str, default='sub-08')
+    parser.add_argument('--no_subject_id', action='store_true', help='Disable subject-specific IDs and use a shared token.',)
     parser.add_argument('--batch_size', type=int, default=1024)
     parser.add_argument('--num_gen_per_class', type=int, default=10)
     parser.add_argument('--prior_steps', type=int, default=50)
@@ -557,6 +567,7 @@ def main():
             eeg_model,
             test_loader,
             device,
+            use_subject_id=not args.no_subject_id,
         ).float()
 
         img_features_native = (
