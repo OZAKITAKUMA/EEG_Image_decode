@@ -465,20 +465,16 @@ class Generator4Embeds:
         self.dtype = torch.float16
         self.device = device
 
-        sdxl_path = sdxl_model_path or "stabilityai/sdxl-turbo"
-        ipa_path = ip_adapter_path or "h94/IP-Adapter"
-
-        print("SDXL path actually used:", sdxl_path)
-        print("IP-Adapter path actually used:", ipa_path)
+        sdxl_path = sdxl_model_path or SDXL_TURBO_DIR
+        ipa_path  = ip_adapter_path  or IP_ADAPTER_DIR
 
         pipe = DiffusionPipeline.from_pretrained(
             sdxl_path,
-            torch_dtype=torch.float16,
-            variant="fp16",
+            torch_dtype=torch.float16, variant="fp16",
             local_files_only=False,
         )
         pipe.to(device)
-
+        # 古いDiffusersでimage_encoder_folder=Noneを使うための回避
         from transformers import CLIPImageProcessor
 
         if getattr(pipe, "feature_extractor", None) is None:
@@ -488,18 +484,14 @@ class Generator4Embeds:
                     crop_size=224,
                 )
             )
-
         pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
-
         pipe.load_ip_adapter(
-            ipa_path,
-            subfolder="sdxl_models",
+            ipa_path, subfolder="sdxl_models",
             weight_name="ip-adapter_sdxl_vit-h.safetensors",
             image_encoder_folder=None,
             torch_dtype=torch.float16,
             local_files_only=False,
         )
-
         pipe.set_ip_adapter_scale(1)
         self.pipe = pipe
 

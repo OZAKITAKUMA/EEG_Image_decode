@@ -71,7 +71,7 @@ def load_test_texts(img_directory_test):
     return texts
 
 
-def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub,
+def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub, clip_projection,
                                  num_gen_per_class=10, device='cuda',
                                  gen_batch_size=1):
     """Generate images directly from EEG encoder output, skipping the diffusion prior (Stage 1)."""
@@ -87,7 +87,15 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
         text_label = texts[k] if k < len(texts) else f"class_{k}"
         os.makedirs(os.path.join(gen_dir, text_label), exist_ok=True)
 
-    all_embeds = eeg_features_test.repeat_interleave(num_gen_per_class, dim=0)
+    eeg_features_clip = (
+    eeg_features_test.float()
+    @ clip_projection.float()
+)
+
+    all_embeds = eeg_features_clip.repeat_interleave(
+        num_gen_per_class,
+        dim=0,
+    )
 
     print(f"\n[Stage 1 / Encoder-only] Generating {total} images (batch_size={gen_batch_size})...")
     for i in tqdm(range(0, total, gen_batch_size), desc="Generating (encoder-only)"):
@@ -103,7 +111,7 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
     return gen_dir
 
 
-def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
+def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub, clip_projection,
                     num_gen_per_class=10, prior_steps=50, guidance_scale=5.0,
                     device='cuda', gen_batch_size=1, prior_batch_size=1024):
     """Generate images from EEG test features using prior + IP-Adapter."""
@@ -128,6 +136,14 @@ def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
                           guidance_scale=guidance_scale)
         prior_embeds.append(h.cpu())
     prior_embeds = torch.cat(prior_embeds, dim=0)
+    # Image CLS空間 1280 → CLIP空間 1024
+    prior_embeds = (
+        prior_embeds.float()
+        @ clip_projection.float()
+    )
+
+    print("Prior after CLIP projection:", prior_embeds.shape)
+
 
     # Step 2: replicate each embedding num_gen_per_class times and generate in batches
     all_embeds = prior_embeds.repeat_interleave(num_gen_per_class, dim=0)
@@ -399,6 +415,12 @@ def main():
                               img_dir_test=args.img_directory_test,
                               features_dir=args.features_dir,
                               subjects=[sub], train=False)
+    clip_projection = test_dataset.visual_projection
+
+    if clip_projection.shape != (1280, 1024):
+        raise RuntimeError(
+            f"projection shapeが不正です: {clip_projection.shape}"
+    )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=0)
     img_features_test_all = test_dataset.img_features
@@ -410,7 +432,7 @@ def main():
     if not args.skip_generation:
         # --- Load encoder ---
         print("Loading ATMS encoder...")
-        eeg_model = ATMS()
+        eeg_model = ATMS(outputs_dim=1280)
         eeg_model.load_state_dict(torch.load(args.encoder_path, map_location=device))
         eeg_model = eeg_model.to(device)
         eeg_model.eval()
@@ -424,7 +446,7 @@ def main():
 
         # --- Load prior ---
         print("Loading Diffusion Prior...")
-        diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=args.prior_dropout)
+        diffusion_prior = DiffusionPriorUNet(cond_dim=1280, embed_dim=1280, dropout=args.prior_dropout)
         diffusion_prior.load_state_dict(torch.load(args.prior_path, map_location=device))
         pipe = Pipe(diffusion_prior, device=device)
 
@@ -442,6 +464,7 @@ def main():
             enc_gen_dir = generate_images_encoder_only(
                 eeg_features_test, generator, texts,
                 args.output_dir, sub,
+                clip_projection=clip_projection,
                 num_gen_per_class=args.num_gen_per_class,
                 device=device,
                 gen_batch_size=args.gen_batch_size,
@@ -452,6 +475,7 @@ def main():
         gen_dir = generate_images(
             eeg_features_test, pipe, generator, texts,
             args.output_dir, sub,
+            clip_projection=clip_projection,
             num_gen_per_class=args.num_gen_per_class,
             prior_steps=args.prior_steps,
             guidance_scale=args.guidance_scale,

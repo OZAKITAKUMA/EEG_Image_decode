@@ -203,11 +203,11 @@ def main():
     print(f"========================")
 
     # ── Models ───────────────────────────────────────────────────────────
-    eeg_model = ATMS()
+    eeg_model = ATMS(outputs_dim=1280)
     eeg_model.to(device)
     encoder_optimizer = AdamW(eeg_model.parameters(), lr=args.lr_encoder)
 
-    diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=args.prior_dropout)
+    diffusion_prior = DiffusionPriorUNet(cond_dim=1280, embed_dim=1280, dropout=args.prior_dropout)
     pipe = Pipe(diffusion_prior, device=device)
 
     # ── Directories ──────────────────────────────────────────────────────

@@ -45,6 +45,8 @@ DATA_PATH="${DATA_PATH:-/home/moepy/ozakitakuma/data_eeg}"
 IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/home/moepy/ozakitakuma/data_image/training_images}"
 IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
 
+SDXL_MODEL_PATH="${SDXL_MODEL_PATH:-stabilityai/sdxl-turbo}"
+IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
 
 # FEATURES_DIR: CLIP feature cache directory.
 # Leave empty (default) → EEGDataset uses EEG_Image_decode/features/ (shared with Retrieval).
@@ -63,6 +65,7 @@ OUTPUT_DIR="./outputs/benchmark"
 # Override at runtime: SUBJECTS="sub-01 sub-08" bash benchmark.sh
 #==============================================================================
 SUBJECTS="${SUBJECTS:-sub-01}"
+# SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
 
 #==============================================================================
 # [RESUME] - Skip training, load models from a previous run timestamp
@@ -191,12 +194,10 @@ for SUBJECT in ${SUBJECTS}; do
             echo "[WARN] Encoder not found: ${ENCODER_PATH}. Skipping ${SUBJECT}."
             continue
         fi
-
         if [ ! -f "${PRIOR_PATH}" ]; then
             echo "[WARN] Prior not found: ${PRIOR_PATH}. Skipping ${SUBJECT}."
             continue
         fi
-
 
         echo "  [INFO] Resuming from timestamp ${TIMESTAMP} for ${SUBJECT}."
         echo "    Encoder: ${ENCODER_PATH}"
@@ -294,9 +295,6 @@ for SUBJECT in ${SUBJECTS}; do
         --prior_dropout ${PRIOR_DROPOUT} \
         --gpu \"${GPU}\" \
         --seed ${SEED}"
-    
-    EVAL_CMD="${EVAL_CMD} --sdxl_model_path \"${SDXL_MODEL_PATH}\""
-    EVAL_CMD="${EVAL_CMD} --ip_adapter_path \"${IP_ADAPTER_PATH}\""
 
     # Only override the shared feature cache when an explicit path is given
     if [ -n "${FEATURES_DIR}" ]; then
@@ -305,6 +303,14 @@ for SUBJECT in ${SUBJECTS}; do
 
     if [ "${EVAL_ENCODER_RECON}" = true ]; then
         EVAL_CMD="${EVAL_CMD} --eval_encoder_recon"
+    fi
+
+    if [ -n "${SDXL_MODEL_PATH}" ]; then
+        EVAL_CMD="${EVAL_CMD} --sdxl_model_path \"${SDXL_MODEL_PATH}\""
+    fi
+
+    if [ -n "${IP_ADAPTER_PATH}" ]; then
+        EVAL_CMD="${EVAL_CMD} --ip_adapter_path \"${IP_ADAPTER_PATH}\""
     fi
 
     eval ${EVAL_CMD}
