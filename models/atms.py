@@ -157,7 +157,7 @@ class ATMS(nn.Module):
         (shared subject token table).
     """
 
-    def __init__(self, num_channels=63, sequence_length=250,
+    def __init__(self, outputs_dim=1024, num_channels=63, sequence_length=250,
                  num_subjects=2, num_features=64, num_latents=1024, num_blocks=1,
                  joint_train=False):
         super().__init__()
@@ -168,7 +168,7 @@ class ATMS(nn.Module):
             [nn.Linear(default_config.d_model, sequence_length)
              for _ in range(num_subjects)])
         self.enc_eeg = Enc_eeg()
-        self.proj_eeg = Proj_eeg()
+        self.proj_eeg = Proj_eeg(embedding_dim=1440, proj_dim=outputs_dim)
         self.logit_scale = nn.Parameter(torch.ones([]) * np.log(1 / 0.07))
         self.loss_func = ClipLoss()
 

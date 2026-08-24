@@ -41,9 +41,13 @@ set -e
 #==============================================================================
 # [DATA PATHS] - Modify these to match your data location
 #==============================================================================
-DATA_PATH="${DATA_PATH:-/vePFS-0x0d/visual/dataset/THINGS_EEG/Preprocessed_data_250Hz}"
-IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/training_images}"
-IMG_DIR_TEST="${IMG_DIR_TEST:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/test_images}"
+DATA_PATH="${DATA_PATH:-/home/moepy/ozakitakuma/data_eeg}"
+IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/home/moepy/ozakitakuma/data_image/training_images}"
+IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
+
+SDXL_MODEL_PATH="${SDXL_MODEL_PATH:-stabilityai/sdxl-turbo}"
+IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
+
 # FEATURES_DIR: CLIP feature cache directory.
 # Leave empty (default) → EEGDataset uses EEG_Image_decode/features/ (shared with Retrieval).
 # Set explicitly only to override the cache location, e.g. a fast local SSD.
@@ -60,7 +64,8 @@ OUTPUT_DIR="./outputs/benchmark"
 # [SUBJECT LIST]
 # Override at runtime: SUBJECTS="sub-01 sub-08" bash benchmark.sh
 #==============================================================================
-SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
+SUBJECTS="${SUBJECTS:-sub-01}"
+# SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
 
 #==============================================================================
 # [RESUME] - Skip training, load models from a previous run timestamp
@@ -71,6 +76,17 @@ SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 su
 #==============================================================================
 RESUME="${RESUME:-}"
 
+# clip：Projection後の1024次元
+# cls：Projection前のCLS 1280次元
+FEATURE_SPACE="${FEATURE_SPACE:-cls}"
+
+if [ "${FEATURE_SPACE}" != "clip" ] && \
+   [ "${FEATURE_SPACE}" != "cls" ]; then
+
+    echo "[ERROR] FEATURE_SPACE must be clip or cls"
+    echo "Current value: ${FEATURE_SPACE}"
+    exit 1
+fi
 #==============================================================================
 # [TRAINING HYPERPARAMETERS]
 #==============================================================================
@@ -92,11 +108,11 @@ PATIENCE=50               # Early-stopping patience (both Phase 1 and Phase 2)
 #==============================================================================
 # [EVALUATION HYPERPARAMETERS]
 #==============================================================================
-NUM_GEN_PER_CLASS=3      # Generated images per test class (= evaluation rounds)
+NUM_GEN_PER_CLASS=1      # Generated images per test class (= evaluation rounds)
 PRIOR_INFERENCE_STEPS=50  # Diffusion Prior denoising steps
 GUIDANCE_SCALE=5.0        # Classifier-free guidance scale
 SDXL_INFERENCE_STEPS=4    # SDXL-Turbo denoising steps
-GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-32}"  # SDXL generation batch size (images per forward pass)
+GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-8}"  # SDXL generation batch size (images per forward pass)
 #
 # EVAL_ENCODER_RECON=true:
 #   Also run Stage-1 generation (encoder embeddings → SDXL, bypassing the prior)
@@ -106,7 +122,7 @@ EVAL_ENCODER_RECON="${EVAL_ENCODER_RECON:-true}"
 #==============================================================================
 # [GPU SETTINGS]
 #==============================================================================
-GPU="${GPU:-cuda:1}"
+GPU="${GPU:-cuda:0}"
 # export CUDA_VISIBLE_DEVICES=0  # Uncomment to restrict GPU
 
 #==============================================================================
@@ -140,6 +156,7 @@ echo "  Total epochs:    ${TOTAL_EPOCHS}  (encoder-only: first ${ENCODER_ONLY_EP
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  Val ratio:       ${VAL_RATIO}  |  Early-stop patience: ${PATIENCE}"
 echo "  Encoder finetune:${ENCODER_FINETUNING}"
+echo "  Feature space:   ${FEATURE_SPACE}"
 if [ -n "${RESUME}" ]; then
 echo "  RESUME timestamp:${RESUME}  (skip training)"
 fi
@@ -224,7 +241,8 @@ for SUBJECT in ${SUBJECTS}; do
             --seed ${SEED} \
             --save_interval ${SAVE_INTERVAL} \
             --val_ratio ${VAL_RATIO} \
-            --patience ${PATIENCE}"
+            --patience ${PATIENCE} \
+            --feature_space ${FEATURE_SPACE}"
 
         # Only override the shared feature cache when an explicit path is given
         if [ -n "${FEATURES_DIR}" ]; then
@@ -288,6 +306,7 @@ for SUBJECT in ${SUBJECTS}; do
         --sdxl_steps ${SDXL_INFERENCE_STEPS} \
         --gen_batch_size ${GEN_BATCH_SIZE} \
         --prior_dropout ${PRIOR_DROPOUT} \
+        --feature_space ${FEATURE_SPACE} \
         --gpu \"${GPU}\" \
         --seed ${SEED}"
 
@@ -298,6 +317,14 @@ for SUBJECT in ${SUBJECTS}; do
 
     if [ "${EVAL_ENCODER_RECON}" = true ]; then
         EVAL_CMD="${EVAL_CMD} --eval_encoder_recon"
+    fi
+
+    if [ -n "${SDXL_MODEL_PATH}" ]; then
+        EVAL_CMD="${EVAL_CMD} --sdxl_model_path \"${SDXL_MODEL_PATH}\""
+    fi
+
+    if [ -n "${IP_ADAPTER_PATH}" ]; then
+        EVAL_CMD="${EVAL_CMD} --ip_adapter_path \"${IP_ADAPTER_PATH}\""
     fi
 
     eval ${EVAL_CMD}

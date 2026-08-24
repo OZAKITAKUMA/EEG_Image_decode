@@ -471,16 +471,26 @@ class Generator4Embeds:
         pipe = DiffusionPipeline.from_pretrained(
             sdxl_path,
             torch_dtype=torch.float16, variant="fp16",
-            local_files_only=True,
+            local_files_only=False,
         )
         pipe.to(device)
+        # 古いDiffusersでimage_encoder_folder=Noneを使うための回避
+        from transformers import CLIPImageProcessor
+
+        if getattr(pipe, "feature_extractor", None) is None:
+            pipe.register_modules(
+                feature_extractor=CLIPImageProcessor(
+                    size=224,
+                    crop_size=224,
+                )
+            )
         pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
         pipe.load_ip_adapter(
             ipa_path, subfolder="sdxl_models",
             weight_name="ip-adapter_sdxl_vit-h.safetensors",
             image_encoder_folder=None,
             torch_dtype=torch.float16,
-            local_files_only=True,
+            local_files_only=False,
         )
         pipe.set_ip_adapter_scale(1)
         self.pipe = pipe

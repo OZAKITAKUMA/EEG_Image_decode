@@ -16,9 +16,9 @@ set -euo pipefail
 # ---------------------------------------------------------------------------
 # ① Data paths  (edit for your environment)
 # ---------------------------------------------------------------------------
-DATA_PATH="${DATA_PATH:-/vePFS-0x0d/visual/dataset/THINGS_EEG/Preprocessed_data_250Hz}"
-IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/training_images}"
-IMG_DIR_TEST="${IMG_DIR_TEST:-/vePFS-0x0d/visual/dataset/THINGS_EEG/images_set/test_images}"
+DATA_PATH="${DATA_PATH:-/home/moepy/ozakitakuma/data_eeg}"
+IMG_DIR_TRAINING="${IMG_DIR_TRAINING:-/home/moepy/ozakitakuma/data_image/training_images}"
+IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
 
 # Directory that contains pre-extracted .pt feature files for ATMS.
 # Set to "" to use the features embedded in the EEGDataset instead.

@@ -55,6 +55,46 @@ def extract_eeg_features(sub, eeg_model, dataloader, device):
             features_list.append(eeg_features.detach().cpu())
     return torch.cat(features_list, dim=0)
 
+def report_embedding_cosine(
+    eeg_features,
+    prior_features,
+    target_features,
+):
+    """
+    eeg_features:    EEG Encoder出力
+    prior_features:  Prior出力
+    target_features: 正解画像の特徴量
+    """
+    eeg_features = eeg_features.float().cpu()
+    prior_features = prior_features.float().cpu()
+    target_features = target_features.float().cpu()
+
+    encoder_cosine = F.cosine_similarity(
+        eeg_features,
+        target_features,
+        dim=1,
+    )
+
+    prior_cosine = F.cosine_similarity(
+        prior_features,
+        target_features,
+        dim=1,
+    )
+
+    print("\n===== Cosine similarity =====")
+    print(
+        f"Encoder → Image: "
+        f"{encoder_cosine.mean().item():.4f}"
+    )
+    print(
+        f"Prior → Image:   "
+        f"{prior_cosine.mean().item():.4f}"
+    )
+    print(
+        f"Priorによる変化: "
+        f"{(prior_cosine - encoder_cosine).mean().item():+.4f}"
+    )    
+    print("======================================\n")
 
 def load_test_texts(img_directory_test):
     """Load test class text labels from the test image directory."""
@@ -71,7 +111,7 @@ def load_test_texts(img_directory_test):
     return texts
 
 
-def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub,
+def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub, clip_projection,
                                  num_gen_per_class=10, device='cuda',
                                  gen_batch_size=1):
     """Generate images directly from EEG encoder output, skipping the diffusion prior (Stage 1)."""
@@ -87,7 +127,15 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
         text_label = texts[k] if k < len(texts) else f"class_{k}"
         os.makedirs(os.path.join(gen_dir, text_label), exist_ok=True)
 
-    all_embeds = eeg_features_test.repeat_interleave(num_gen_per_class, dim=0)
+    eeg_features_clip = (
+    eeg_features_test.float()
+    @ clip_projection.float()
+)
+
+    all_embeds = eeg_features_clip.repeat_interleave(
+        num_gen_per_class,
+        dim=0,
+    )
 
     print(f"\n[Stage 1 / Encoder-only] Generating {total} images (batch_size={gen_batch_size})...")
     for i in tqdm(range(0, total, gen_batch_size), desc="Generating (encoder-only)"):
@@ -103,7 +151,7 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
     return gen_dir
 
 
-def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
+def generate_images(eeg_features_test, img_features_test, pipe, generator, texts, output_dir, sub, clip_projection,
                     num_gen_per_class=10, prior_steps=50, guidance_scale=5.0,
                     device='cuda', gen_batch_size=1, prior_batch_size=1024):
     """Generate images from EEG test features using prior + IP-Adapter."""
@@ -128,6 +176,21 @@ def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
                           guidance_scale=guidance_scale)
         prior_embeds.append(h.cpu())
     prior_embeds = torch.cat(prior_embeds, dim=0)
+
+    report_embedding_cosine(
+    eeg_features=eeg_features_test,
+    prior_features=prior_embeds,
+    target_features=img_features_test,
+    )
+
+    # Image CLS空間 1280 → CLIP空間 1024
+    prior_embeds = (
+        prior_embeds.float()
+        @ clip_projection.float()
+    )
+
+    print("Prior after CLIP projection:", prior_embeds.shape)
+
 
     # Step 2: replicate each embedding num_gen_per_class times and generate in batches
     all_embeds = prior_embeds.repeat_interleave(num_gen_per_class, dim=0)
@@ -383,7 +446,12 @@ def main():
     parser.add_argument('--eval_encoder_recon', action='store_true',
                         help='Also evaluate encoder-only reconstruction (Stage 1, no prior) '
                              'and print a side-by-side comparison with the full pipeline (Stage 2)')
+    parser.add_argument("--cosine_only", action="store_true", help="コサイン類似度だけ計算して画像生成を行わない",)
+    parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
+                        help=("Feature space used by the trained encoder and prior"),)
     args = parser.parse_args()
+
+    feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -398,7 +466,32 @@ def main():
                               img_dir_training=args.img_dir_training,
                               img_dir_test=args.img_directory_test,
                               features_dir=args.features_dir,
-                              subjects=[sub], train=False)
+                              subjects=[sub], train=False,
+                              feature_space=args.feature_space,
+                              )
+    if args.feature_space == "cls":
+    # CLS 1280次元を生成用CLIP 1024次元へ変換
+        clip_projection = (
+            test_dataset.visual_projection
+        )
+
+        if (
+            clip_projection is None
+            or tuple(clip_projection.shape)
+            != (1280, 1024)
+        ):
+            raise RuntimeError(
+                "CLS mode requires projection "
+                "shape (1280, 1024), but got "
+                f"{None if clip_projection is None else clip_projection.shape}"
+            )
+
+    else:
+        # CLIP特徴は既に1024次元なので、そのまま通す
+        clip_projection = torch.eye(
+            1024,
+            dtype=torch.float32,
+        )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=0)
     img_features_test_all = test_dataset.img_features
@@ -410,7 +503,7 @@ def main():
     if not args.skip_generation:
         # --- Load encoder ---
         print("Loading ATMS encoder...")
-        eeg_model = ATMS()
+        eeg_model = ATMS(outputs_dim=feature_dim)
         eeg_model.load_state_dict(torch.load(args.encoder_path, map_location=device))
         eeg_model = eeg_model.to(device)
         eeg_model.eval()
@@ -424,9 +517,35 @@ def main():
 
         # --- Load prior ---
         print("Loading Diffusion Prior...")
-        diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=args.prior_dropout)
+        diffusion_prior = DiffusionPriorUNet(cond_dim=feature_dim,embed_dim=feature_dim,dropout=args.prior_dropout,)
         diffusion_prior.load_state_dict(torch.load(args.prior_path, map_location=device))
         pipe = Pipe(diffusion_prior, device=device)
+
+        if args.cosine_only:
+            prior_embeds = []
+
+            for i in range(0, len(eeg_features_test), args.batch_size):
+                batch = eeg_features_test[
+                    i:i + args.batch_size
+                ].to(device)
+
+                h = pipe.generate(
+                    c_embeds=batch,
+                    num_inference_steps=args.prior_steps,
+                    guidance_scale=args.guidance_scale,
+                )
+
+                prior_embeds.append(h.cpu())
+
+            prior_embeds = torch.cat(prior_embeds, dim=0)
+
+            report_embedding_cosine(
+                eeg_features=eeg_features_test,
+                prior_features=prior_embeds,
+                target_features=img_features_test_all,
+            )
+
+            return
 
         # --- Load generator (shared by both stages) ---
         print("Loading IP-Adapter + SDXL-Turbo...")
@@ -442,6 +561,7 @@ def main():
             enc_gen_dir = generate_images_encoder_only(
                 eeg_features_test, generator, texts,
                 args.output_dir, sub,
+                clip_projection=clip_projection,
                 num_gen_per_class=args.num_gen_per_class,
                 device=device,
                 gen_batch_size=args.gen_batch_size,
@@ -450,8 +570,10 @@ def main():
         # --- Stage 2: full pipeline generation (encoder → prior → SDXL) ---
         print("\n[Stage 2 / Full pipeline] Generating images via Diffusion Prior...")
         gen_dir = generate_images(
-            eeg_features_test, pipe, generator, texts,
+            eeg_features_test, img_features_test_all, 
+            pipe, generator, texts,
             args.output_dir, sub,
+            clip_projection=clip_projection,
             num_gen_per_class=args.num_gen_per_class,
             prior_steps=args.prior_steps,
             guidance_scale=args.guidance_scale,
