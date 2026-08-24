@@ -32,8 +32,8 @@ FEATURES_DIR="${FEATURES_DIR:-}"
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
 # Keep encoder-only artifacts separate from the original benchmark.
-MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only_loso_idfree}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only_loso_idfree}"
+MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only_loso_idfree/cls}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only_loso_idfree/cls}"
 
 #==============================================================================
 # Experiment settings
@@ -51,7 +51,7 @@ ALL_SUBJECTS=(
     sub-10
 )
 # 除外被験者(test用)
-SUBJECTS="${SUBJECTS:-sub-08}"
+SUBJECTS="${ALL_SUBJECTS[*]}"
 RESUME="${RESUME:-}"
 
 ENCODER_EPOCHS="${ENCODER_EPOCHS:-100}"
@@ -63,7 +63,7 @@ PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
 
 # CLIP projected feature space (1024-D) is the default baseline.
-FEATURE_SPACE="${FEATURE_SPACE:-clip}"
+FEATURE_SPACE="cls"                                                                #
 if [ "${FEATURE_SPACE}" != "clip" ] && [ "${FEATURE_SPACE}" != "cls" ]; then
     echo "[ERROR] FEATURE_SPACE must be clip or cls"
     exit 1

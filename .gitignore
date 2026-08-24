@@ -98,9 +98,3 @@ Retrieval/LAVIS/
 .cache/
 tmp/
 temp/
-
-# Local Hugging Face model cache
-/Generation/vision_models/models--laion--CLIP-ViT-H-14-laion2B-s32B-b79K/
-
-# Hugging Face cache locks
-/Generation/vision_models/.locks/
