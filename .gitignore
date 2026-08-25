@@ -83,6 +83,7 @@ Generation/wandb/
 Generation/LAVIS/
 Generation/diffusers/
 Generation/THINGS/
+Generation/vision_models/
 
 # ── Retrieval module ──────────────────────────────────────────────────────────
 Retrieval/models/

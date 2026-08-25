@@ -33,12 +33,14 @@ import pandas as pd
 from skimage.color import rgb2gray
 from skimage.metrics import structural_similarity as ssim_func
 
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from eegdatasets import EEGDataset
 from diffusion_prior import DiffusionPriorUNet, Pipe
 from models.atms import ATMS, extract_id_from_string
 from pipeline import Generator4Embeds
+from models.eeg_clip_adapter import EEGCLIPAdapter
 
 
 def extract_eeg_features(sub, eeg_model, dataloader, device):
@@ -55,6 +57,46 @@ def extract_eeg_features(sub, eeg_model, dataloader, device):
             features_list.append(eeg_features.detach().cpu())
     return torch.cat(features_list, dim=0)
 
+def report_embedding_cosine(
+    eeg_features,
+    prior_features,
+    target_features,
+):
+    """
+    eeg_features:    EEG Encoder出力
+    prior_features:  Prior出力
+    target_features: 正解画像の特徴量
+    """
+    eeg_features = eeg_features.float().cpu()
+    prior_features = prior_features.float().cpu()
+    target_features = target_features.float().cpu()
+
+    encoder_cosine = F.cosine_similarity(
+        eeg_features,
+        target_features,
+        dim=1,
+    )
+
+    prior_cosine = F.cosine_similarity(
+        prior_features,
+        target_features,
+        dim=1,
+    )
+
+    print("\n===== Cosine similarity =====")
+    print(
+        f"Encoder → Image: "
+        f"{encoder_cosine.mean().item():.4f}"
+    )
+    print(
+        f"Prior → Image:   "
+        f"{prior_cosine.mean().item():.4f}"
+    )
+    print(
+        f"Priorによる変化: "
+        f"{(prior_cosine - encoder_cosine).mean().item():+.4f}"
+    )    
+    print("======================================\n")
 
 def load_test_texts(img_directory_test):
     """Load test class text labels from the test image directory."""
@@ -71,11 +113,11 @@ def load_test_texts(img_directory_test):
     return texts
 
 
-def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub,
+def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir, sub, clip_projection,
                                  num_gen_per_class=10, device='cuda',
-                                 gen_batch_size=1):
+                                 gen_batch_size=1, output_folder="generated_imgs_encoder_only",):
     """Generate images directly from EEG encoder output, skipping the diffusion prior (Stage 1)."""
-    gen_dir = os.path.join(output_dir, 'generated_imgs_encoder_only', sub)
+    gen_dir = os.path.join(output_dir, output_folder, sub)
     if os.path.isdir(gen_dir):
         shutil.rmtree(gen_dir)
     os.makedirs(gen_dir)
@@ -87,7 +129,15 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
         text_label = texts[k] if k < len(texts) else f"class_{k}"
         os.makedirs(os.path.join(gen_dir, text_label), exist_ok=True)
 
-    all_embeds = eeg_features_test.repeat_interleave(num_gen_per_class, dim=0)
+    eeg_features_clip = (
+    eeg_features_test.float()
+    @ clip_projection.float()
+)
+
+    all_embeds = eeg_features_clip.repeat_interleave(
+        num_gen_per_class,
+        dim=0,
+    )
 
     print(f"\n[Stage 1 / Encoder-only] Generating {total} images (batch_size={gen_batch_size})...")
     for i in tqdm(range(0, total, gen_batch_size), desc="Generating (encoder-only)"):
@@ -103,7 +153,7 @@ def generate_images_encoder_only(eeg_features_test, generator, texts, output_dir
     return gen_dir
 
 
-def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
+def generate_images(eeg_features_test, img_features_test, pipe, generator, texts, output_dir, sub, clip_projection,
                     num_gen_per_class=10, prior_steps=50, guidance_scale=5.0,
                     device='cuda', gen_batch_size=1, prior_batch_size=1024):
     """Generate images from EEG test features using prior + IP-Adapter."""
@@ -128,6 +178,21 @@ def generate_images(eeg_features_test, pipe, generator, texts, output_dir, sub,
                           guidance_scale=guidance_scale)
         prior_embeds.append(h.cpu())
     prior_embeds = torch.cat(prior_embeds, dim=0)
+
+    report_embedding_cosine(
+    eeg_features=eeg_features_test,
+    prior_features=prior_embeds,
+    target_features=img_features_test,
+    )
+
+    # Image CLS空間 1280 → CLIP空間 1024
+    prior_embeds = (
+        prior_embeds.float()
+        @ clip_projection.float()
+    )
+
+    print("Prior after CLIP projection:", prior_embeds.shape)
+
 
     # Step 2: replicate each embedding num_gen_per_class times and generate in batches
     all_embeds = prior_embeds.repeat_interleave(num_gen_per_class, dim=0)
@@ -357,7 +422,8 @@ def main():
                              'Defaults to EEG_Image_decode/features/ (shared cache).')
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--encoder_path', type=str, required=True)
-    parser.add_argument('--prior_path', type=str, required=True)
+    parser.add_argument('--prior_path', type=str, default=None,
+                        help='Diffusion Prior checkpoint; not required with --encoder_only')
     parser.add_argument('--sdxl_model_path', type=str, default=None,
                         help='Local path to SDXL-Turbo model directory. '
                              'Defaults to /vePFS-0x0d/visual/dataset/pretrained/sdxl-turbo')
@@ -383,7 +449,44 @@ def main():
     parser.add_argument('--eval_encoder_recon', action='store_true',
                         help='Also evaluate encoder-only reconstruction (Stage 1, no prior) '
                              'and print a side-by-side comparison with the full pipeline (Stage 2)')
+    parser.add_argument('--encoder_only', action='store_true',
+                        help='Generate and evaluate only from the EEG encoder; '
+                             'do not load or run the Diffusion Prior')
+    parser.add_argument("--cosine_only", action="store_true", help="コサイン類似度だけ計算して画像生成を行わない",)
+    parser.add_argument("--retrieval_only", action="store_true", help="画像検索だけ実行し、Priorと画像生成を行わない",)
+    parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
+                        help=("Feature space used by the trained encoder and prior"),)
+    parser.add_argument("--adapter_path", type=str, default=None,)
+    parser.add_argument("--use_adapter", action="store_true",)
     args = parser.parse_args()
+
+    if args.use_adapter:
+        if args.feature_space != "cls":
+            raise ValueError(
+                "--use_adapterには"
+                "--feature_space clsが必要です"
+            )
+
+        if args.adapter_path is None:
+            raise ValueError(
+                "--adapter_pathを指定してください"
+            )
+
+    if args.encoder_only and args.cosine_only:
+        raise ValueError(
+            "--cosine_onlyはDiffusion Prior用のため--encoder_onlyと併用できません"
+        )
+
+    if (
+        not args.encoder_only
+        and not args.retrieval_only
+        and not args.prior_path
+    ):
+        raise ValueError(
+            "Priorを使う評価では--prior_pathを指定してください"
+        )
+
+    feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -398,7 +501,33 @@ def main():
                               img_dir_training=args.img_dir_training,
                               img_dir_test=args.img_directory_test,
                               features_dir=args.features_dir,
-                              subjects=[sub], train=False)
+                              subjects=[sub], train=False,
+                              feature_space=args.feature_space,
+                              )
+    
+    if args.feature_space == "cls":
+    # CLS 1280次元を生成用CLIP 1024次元へ変換
+        clip_projection = (
+            test_dataset.visual_projection
+        )
+
+        if (
+            clip_projection is None
+            or tuple(clip_projection.shape)
+            != (1280, 1024)
+        ):
+            raise RuntimeError(
+                "CLS mode requires projection "
+                "shape (1280, 1024), but got "
+                f"{None if clip_projection is None else clip_projection.shape}"
+            )
+
+    else:
+        # CLIP特徴は既に1024次元なので、そのまま通す
+        clip_projection = torch.eye(
+            1024,
+            dtype=torch.float32,
+        )
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size,
                              shuffle=False, num_workers=0)
     img_features_test_all = test_dataset.img_features
@@ -410,61 +539,222 @@ def main():
     if not args.skip_generation:
         # --- Load encoder ---
         print("Loading ATMS encoder...")
-        eeg_model = ATMS()
+        eeg_model = ATMS(outputs_dim=feature_dim)
         eeg_model.load_state_dict(torch.load(args.encoder_path, map_location=device))
         eeg_model = eeg_model.to(device)
         eeg_model.eval()
 
         # --- Extract EEG features ---
         print("Extracting EEG features from test set...")
-        eeg_features_test = extract_eeg_features(sub, eeg_model, test_loader, device)
+        # eeg_features_test = extract_eeg_features(sub, eeg_model, test_loader, device)
+
+        # eeg_features_test = (eeg_features_test.float() @ clip_projection.float())
+        # img_features_test_all = (img_features_test_all.float() @ clip_projection.float())
+
+        # Encoder・Priorが使用する生のCLS特徴
+        eeg_features_native = extract_eeg_features(
+            sub,
+            eeg_model,
+            test_loader,
+            device,
+        ).float()
+
+        img_features_native = (
+            test_dataset.img_features.float()
+        )
+
+        if args.use_adapter:
+            print("Loading EEG CLS -> CLIP Adapter...")
+
+            adapter = EEGCLIPAdapter(clip_projection)
+
+            adapter.load_state_dict(
+                torch.load(args.adapter_path, map_location=device,))
+            adapter = adapter.to(device)
+            adapter.eval()
+
+            # Encoder-only生成で使用する1024次元特徴
+            with torch.no_grad():
+                encoder_generation_features = adapter(
+                    eeg_features_native.to(device)
+                ).cpu()
+
+            # すでに1024次元なので、後段では変換しない
+            encoder_generation_projection = torch.eye(
+                1024,
+                dtype=torch.float32,
+            )
+
+        else:
+            # 従来の固定visual.projを使用
+            encoder_generation_features = (
+                eeg_features_native
+            )
+
+            encoder_generation_projection = (
+                clip_projection
+            )
+
+        # Prior側はAdapterを通さず、CLS 1280次元のまま
+        eeg_features_test = eeg_features_native
+        img_features_test_all = img_features_native
+ 
+        # 簡易的な検索タスク実行 # 
+        eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
+        img_norm = F.normalize(img_features_test_all.float(), dim=1)
+
+        similarity = eeg_norm @ img_norm.T
+
+        pred_top1 = similarity.argmax(dim=1)
+        targets = torch.arange(len(eeg_norm))
+
+        top1_acc = (pred_top1 == targets).float().mean()
+
+        top5_indices = similarity.topk(5, dim=1).indices
+        top5_acc = (
+            top5_indices == targets.unsqueeze(1)
+        ).any(dim=1).float().mean()
+
+        print(f"Retrieval Top-1: {top1_acc.item():.4f}")
+        print(f"Retrieval Top-5: {top5_acc.item():.4f}")
+        
+        # 検索タスク終了 #
+        if args.retrieval_only:
+            print("Retrieval-only evaluation finished.")
+            return
+
+        
         print(f"  EEG features shape: {eeg_features_test.shape}")
         del eeg_model
         torch.cuda.empty_cache()
 
-        # --- Load prior ---
-        print("Loading Diffusion Prior...")
-        diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=args.prior_dropout)
-        diffusion_prior.load_state_dict(torch.load(args.prior_path, map_location=device))
-        pipe = Pipe(diffusion_prior, device=device)
+        gen_dir = None
+        if args.encoder_only:
+            # Dedicated path: do not create or load a Diffusion Prior.
+            print("Loading IP-Adapter + SDXL-Turbo...")
+            generator = Generator4Embeds(
+                num_inference_steps=args.sdxl_steps,
+                device=str(device),
+                sdxl_model_path=args.sdxl_model_path,
+                ip_adapter_path=args.ip_adapter_path,
+            )
 
-        # --- Load generator (shared by both stages) ---
-        print("Loading IP-Adapter + SDXL-Turbo...")
-        generator = Generator4Embeds(
-            num_inference_steps=args.sdxl_steps,
-            device=str(device),
-            sdxl_model_path=args.sdxl_model_path,
-            ip_adapter_path=args.ip_adapter_path,
-        )
-
-        # --- Stage 1: encoder-only generation (optional) ---
-        if args.eval_encoder_recon:
+            if args.use_adapter:
+                encoder_output_folder = (
+                    "generated_imgs_encoder_only_adapter"
+                )
+            else:
+                encoder_output_folder = (
+                    "generated_imgs_encoder_only"
+                )
             enc_gen_dir = generate_images_encoder_only(
-                eeg_features_test, generator, texts,
+                encoder_generation_features, generator, texts,
                 args.output_dir, sub,
+                clip_projection=encoder_generation_projection,
                 num_gen_per_class=args.num_gen_per_class,
                 device=device,
                 gen_batch_size=args.gen_batch_size,
+                output_folder=encoder_output_folder,
+            )
+            del generator
+        else:
+            # --- Load prior ---
+            print("Loading Diffusion Prior...")
+            diffusion_prior = DiffusionPriorUNet(
+                cond_dim=feature_dim,
+                embed_dim=feature_dim,
+                dropout=args.prior_dropout,
+            )
+            diffusion_prior.load_state_dict(
+                torch.load(args.prior_path, map_location=device)
+            )
+            pipe = Pipe(diffusion_prior, device=device)
+
+            if args.cosine_only:
+                prior_embeds = []
+
+                for i in range(0, len(eeg_features_test), args.batch_size):
+                    batch = eeg_features_test[
+                        i:i + args.batch_size
+                    ].to(device)
+
+                    h = pipe.generate(
+                        c_embeds=batch,
+                        num_inference_steps=args.prior_steps,
+                        guidance_scale=args.guidance_scale,
+                    )
+
+                    prior_embeds.append(h.cpu())
+
+                prior_embeds = torch.cat(prior_embeds, dim=0)
+
+                report_embedding_cosine(
+                    eeg_features=eeg_features_test,
+                    prior_features=prior_embeds,
+                    target_features=img_features_test_all,
+                )
+
+                return
+
+            # --- Load generator (shared by both stages) ---
+            print("Loading IP-Adapter + SDXL-Turbo...")
+            generator = Generator4Embeds(
+                num_inference_steps=args.sdxl_steps,
+                device=str(device),
+                sdxl_model_path=args.sdxl_model_path,
+                ip_adapter_path=args.ip_adapter_path,
             )
 
-        # --- Stage 2: full pipeline generation (encoder → prior → SDXL) ---
-        print("\n[Stage 2 / Full pipeline] Generating images via Diffusion Prior...")
-        gen_dir = generate_images(
-            eeg_features_test, pipe, generator, texts,
-            args.output_dir, sub,
-            num_gen_per_class=args.num_gen_per_class,
-            prior_steps=args.prior_steps,
-            guidance_scale=args.guidance_scale,
-            device=device,
-            gen_batch_size=args.gen_batch_size,
-            prior_batch_size=args.batch_size,
-        )
-        del pipe, generator
+            # --- Stage 1: encoder-only generation (optional) ---
+            if args.eval_encoder_recon:
+                if args.use_adapter:
+                    encoder_output_folder = (
+                        "generated_imgs_encoder_only_adapter"
+                    )
+                else:
+                    encoder_output_folder = (
+                        "generated_imgs_encoder_only"
+                    )
+                enc_gen_dir = generate_images_encoder_only(
+                    encoder_generation_features, generator, texts,
+                    args.output_dir, sub,
+                    clip_projection=encoder_generation_projection,
+                    num_gen_per_class=args.num_gen_per_class,
+                    device=device,
+                    gen_batch_size=args.gen_batch_size,
+                    output_folder=encoder_output_folder,
+                )
+
+            # --- Stage 2: full pipeline generation (encoder → prior → SDXL) ---
+            print("\n[Stage 2 / Full pipeline] Generating images via Diffusion Prior...")
+            gen_dir = generate_images(
+                eeg_features_test, img_features_test_all,
+                pipe, generator, texts,
+                args.output_dir, sub,
+                clip_projection=clip_projection,
+                num_gen_per_class=args.num_gen_per_class,
+                prior_steps=args.prior_steps,
+                guidance_scale=args.guidance_scale,
+                device=device,
+                gen_batch_size=args.gen_batch_size,
+                prior_batch_size=args.batch_size,
+            )
+            del pipe, generator
+
         torch.cuda.empty_cache()
     else:
-        gen_dir = args.generated_imgs_dir or os.path.join(args.output_dir, 'generated_imgs', sub)
-        print(f"Skipping generation, using images from: {gen_dir}")
-        if args.eval_encoder_recon:
+        gen_dir = None
+        if args.encoder_only:
+            enc_gen_dir = (
+                args.generated_imgs_dir
+                or os.path.join(args.output_dir, 'generated_imgs_encoder_only', sub)
+            )
+            print(f"Skipping generation, using encoder-only images from: {enc_gen_dir}")
+        else:
+            gen_dir = args.generated_imgs_dir or os.path.join(args.output_dir, 'generated_imgs', sub)
+            print(f"Skipping generation, using images from: {gen_dir}")
+
+        if args.eval_encoder_recon and not args.encoder_only:
             enc_gen_dir = os.path.join(args.output_dir, 'generated_imgs_encoder_only', sub)
             if not os.path.isdir(enc_gen_dir):
                 print(f"[WARN] --eval_encoder_recon requested but encoder-only image dir not found: {enc_gen_dir}")
@@ -485,6 +775,36 @@ def main():
         print("=" * 60)
         enc_metrics, enc_stds = compute_metrics(enc_recons_grouped, gt_images, device,
                                                 n_per_class=enc_n_per_class)
+
+    if args.encoder_only:
+        if enc_metrics is None:
+            raise RuntimeError(
+                "Encoder-only画像が見つからず、評価指標を計算できませんでした"
+            )
+
+        print("\n" + "=" * 50)
+        print("ENCODER-ONLY RECONSTRUCTION METRICS")
+        print("=" * 50)
+        enc_df = pd.DataFrame({
+            "Metric": list(enc_metrics.keys()),
+            "Mean": [f"{v:.4f}" for v in enc_metrics.values()],
+            "Std": [f"{enc_stds[k]:.4f}" for k in enc_metrics.keys()],
+        })
+        print(enc_df.to_string(index=False))
+        print("=" * 50)
+
+        encoder_suffix = (
+            "encoder_only_adapter"
+            if args.use_adapter
+            else "encoder_only"
+        )
+        enc_results_path = os.path.join(
+            args.output_dir,
+            f"reconstruction_metrics_{sub}_{encoder_suffix}.csv",
+        )
+        enc_df.to_csv(enc_results_path, sep='\t', index=False)
+        print(f"\nEncoder-only metrics saved to: {enc_results_path}")
+        return
 
     # --- Stage 2 metrics (full pipeline) ---
     print("\nLoading full-pipeline images for metric computation...")
@@ -520,9 +840,19 @@ def main():
             "Mean": [f"{v:.4f}" for v in enc_metrics.values()],
             "Std": [f"{enc_stds[k]:.4f}" for k in enc_metrics.keys()],
         })
-        enc_results_path = os.path.join(args.output_dir, f'reconstruction_metrics_{sub}_encoder_only.csv')
+
+        if args.use_adapter:
+            encoder_suffix = "encoder_only_adapter"
+        else:
+            encoder_suffix = "encoder_only"
+
+        enc_results_path = os.path.join(
+            args.output_dir,
+            f"reconstruction_metrics_{sub}_{encoder_suffix}.csv",
+        )
         enc_df.to_csv(enc_results_path, sep='\t', index=False)
         print(f"\nEncoder-only metrics saved to: {enc_results_path}")
+
     else:
         print("\n" + "=" * 50)
         print("RECONSTRUCTION METRICS SUMMARY")

@@ -89,11 +89,18 @@ def _ensure_clip_loaded():
     import open_clip
     device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
     cache_dir = os.environ.get('OPEN_CLIP_CACHE_DIR', None)
-    model, preprocess_train, _ = open_clip.create_model_and_transforms(
-        _CLIP_MODEL_TYPE, pretrained='laion2b_s32b_b79k',
-        precision='fp32', device=device, cache_dir=cache_dir)
-    _clip_state['model'] = model
-    _clip_state['preprocess'] = preprocess_train
+    model, _, preprocess_val = open_clip.create_model_and_transforms(
+        _CLIP_MODEL_TYPE,
+        pretrained="laion2b_s32b_b79k",
+        precision="fp32",
+        device=device,
+        cache_dir=cache_dir,
+    )
+
+    model.eval()
+
+    _clip_state["model"] = model
+    _clip_state["preprocess"] = preprocess_val
     _clip_state['device'] = device
     _clip_state['clip'] = clip
     print(f"OpenCLIP {_CLIP_MODEL_TYPE} loaded on {device}")
@@ -141,7 +148,9 @@ class EEGDataset(Dataset):
                  time_window=None,
                  classes=None,
                  pictures=None,
-                 avg_trials=False):
+                 avg_trials=False,
+                 feature_space="cls",
+                 ):
 
         if time_window is None:
             time_window = [0, 1.0]
@@ -163,6 +172,12 @@ class EEGDataset(Dataset):
         self.classes = classes
         self.pictures = pictures
         self.exclude_subject = exclude_subject
+        if feature_space not in ("clip", "cls"):
+            raise ValueError(
+                f"Unknown feature_space: {feature_space!r}. "
+                "Choose 'clip' or 'cls'."
+            )
+        self.feature_space = feature_space
         self.avg_trials = avg_trials and train
 
         assert any(s in self.subject_list for s in self.subjects), \
@@ -170,7 +185,9 @@ class EEGDataset(Dataset):
 
         self.data, self.labels, self.text, self.img = self._load_eeg_and_images()
         self.data = self._extract_time_window(self.data, time_window)
-
+        
+        self.visual_projection = None
+        
         # ── Feature loading ──────────────────────────────────────────────
         if preloaded_features is not None:
             # Fastest path: caller already loaded features once outside loop
@@ -239,167 +256,448 @@ class EEGDataset(Dataset):
                 + ', '.join(_FEATURE_DEFAULTS))
 
     def _load_clip_features(self):
-        fname = (f'{_CLIP_MODEL_TYPE}_features_train.pt' if self.train
-                 else f'{_CLIP_MODEL_TYPE}_features_test.pt')
+        split = "train" if self.train else "test"
+        if self.feature_space == "cls":
+            fname = (
+                f"{_CLIP_MODEL_TYPE}_"
+                f"preprojection_features_{split}.pt"
+            )
+        else:
+            fname = (
+                f"{_CLIP_MODEL_TYPE}_features_{split}.pt"
+            )
+
         candidates = [
             self.features_path,
             os.path.join(self.features_dir, fname),
             fname,
         ]
-        load_from = next((p for p in candidates
-                          if p and os.path.exists(p)), None)
+
+        load_from = next(
+            (p for p in candidates if p and os.path.exists(p)),
+            None,
+        )
+
         if load_from is not None:
             print(f"Loading pre-extracted CLIP features from: {load_from}")
-            saved = torch.load(load_from, weights_only=False)
-            self.text_features = saved['text_features']
-            self.img_features = saved['img_features']
+
+            saved = torch.load(
+                load_from,
+                map_location="cpu",
+                weights_only=False,
+            )
+
+            self.text_features = saved["text_features"]
+            self.img_features = saved["img_features"]
+            self.visual_projection = saved.get("visual_projection")
+
+            # 古いキャッシュにprojectionがない場合だけ追加
+            if (self.feature_space == "cls" and self.visual_projection is None):
+                _ensure_clip_loaded()
+
+                self.visual_projection = (
+                    _clip_state["model"]
+                    .visual.proj
+                    .detach()
+                    .float()
+                    .cpu()
+                )
+
+                saved["visual_projection"] = self.visual_projection
+                torch.save(saved, load_from)
+
         else:
-            print("CLIP features not found — computing from scratch...")
+            print("CLIP preprojection featuresを抽出します")
+
             _ensure_clip_loaded()
+
             self.text_features = self._encode_text(self.text)
             self.img_features = self._encode_images(self.img)
+            
+            if self.feature_space == "cls":
+                self.visual_projection = (
+                    _clip_state["model"]
+                    .visual.proj
+                    .detach()
+                    .float()
+                    .cpu()
+                )
+
             cache = os.path.join(self.features_dir, fname)
             os.makedirs(self.features_dir, exist_ok=True)
-            torch.save({'text_features': self.text_features.cpu(),
-                        'img_features': self.img_features.cpu()}, cache)
-            print(f"CLIP features saved to: {cache}")
 
-    # ── EEG + image path loading ──────────────────────────────────────────────
+            torch.save(
+                {
+                    "text_features": self.text_features.cpu(),
+                    "img_features": self.img_features.cpu(),
+                    "visual_projection": self.visual_projection,
+                },
+                cache,
+            )
 
+            print(f"保存しました: {cache}")
+
+        # CLIP本体は以降不要
+        _clip_state.clear()
+
+        import gc
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        print(f"Image features ({self.feature_space}):", self.img_features.shape,)
+
+        if self.visual_projection is not None:
+            print("Visual projection:", self.visual_projection.shape,)
+    
     def _load_eeg_and_images(self):
-        data_list, label_list = [], []
-        texts, images = [], []
+        data_list = []
+        label_list = []
+        texts = []
+        images = []
 
-        img_directory = self.img_dir_training if self.train else self.img_dir_test
+        img_directory = (
+            self.img_dir_training
+            if self.train
+            else self.img_dir_test
+        )
+
         if img_directory is None:
             raise ValueError(
                 f"{'img_dir_training' if self.train else 'img_dir_test'} "
-                "must be provided.")
+                "must be provided."
+            )
 
         all_folders = sorted(
-            d for d in os.listdir(img_directory)
-            if os.path.isdir(os.path.join(img_directory, d)))
+            folder
+            for folder in os.listdir(img_directory)
+            if os.path.isdir(
+                os.path.join(img_directory, folder)
+            )
+        )
 
-        # Build text labels
+        # テキストラベルを作成
         selected_folders = (
             [all_folders[i] for i in self.classes]
-            if self.classes is not None else all_folders)
+            if self.classes is not None
+            else all_folders
+        )
+
         for folder in selected_folders:
             try:
-                texts.append(f"This picture is {folder[folder.index('_') + 1:]}")
+                class_name = folder[folder.index("_") + 1:]
+                texts.append(f"This picture is {class_name}")
             except ValueError:
-                pass   # no underscore — skip
+                pass
 
-        # Build image file list
-        def _list_images(fp):
-            return sorted(f for f in os.listdir(fp)
-                          if f.lower().endswith(('.png', '.jpg', '.jpeg')))
+        # 画像ファイル一覧を作成
+        def _list_images(folder_path):
+            return sorted(
+                filename
+                for filename in os.listdir(folder_path)
+                if filename.lower().endswith(
+                    (".png", ".jpg", ".jpeg")
+                )
+            )
 
-        if self.classes is not None and self.pictures is not None:
-            for ci, pi in zip(self.classes, self.pictures):
-                fp = os.path.join(img_directory, all_folders[ci])
-                imgs = _list_images(fp)
-                if pi < len(imgs):
-                    images.append(os.path.join(fp, imgs[pi]))
+        if (
+            self.classes is not None
+            and self.pictures is not None
+        ):
+            for class_index, picture_index in zip(
+                self.classes,
+                self.pictures,
+            ):
+                folder_path = os.path.join(
+                    img_directory,
+                    all_folders[class_index],
+                )
+
+                image_names = _list_images(folder_path)
+
+                if picture_index < len(image_names):
+                    images.append(
+                        os.path.join(
+                            folder_path,
+                            image_names[picture_index],
+                        )
+                    )
+
         elif self.classes is not None:
-            for ci in self.classes:
-                fp = os.path.join(img_directory, all_folders[ci])
-                images.extend(os.path.join(fp, f) for f in _list_images(fp))
+            for class_index in self.classes:
+                folder_path = os.path.join(
+                    img_directory,
+                    all_folders[class_index],
+                )
+
+                images.extend(
+                    os.path.join(folder_path, filename)
+                    for filename in _list_images(folder_path)
+                )
+
         else:
             for folder in all_folders:
-                fp = os.path.join(img_directory, folder)
-                images.extend(os.path.join(fp, f) for f in _list_images(fp))
+                folder_path = os.path.join(
+                    img_directory,
+                    folder,
+                )
 
-        print(f"Subjects: {self.subjects}  exclude: {self.exclude_subject}")
+                images.extend(
+                    os.path.join(folder_path, filename)
+                    for filename in _list_images(folder_path)
+                )
 
-        # Load EEG
+        print(
+            f"Subjects: {self.subjects} "
+            f"exclude: {self.exclude_subject}"
+        )
+
+        # EEGを読み込む
         for subject in self.subjects:
             if self.train:
                 if subject == self.exclude_subject:
                     continue
-                fp = os.path.join(self.data_path, subject,
-                                  'preprocessed_eeg_training.npy')
-                data = np.load(fp, allow_pickle=True)
-                eeg = torch.from_numpy(
-                    data['preprocessed_eeg_data']).float().detach()
-                times = torch.from_numpy(data['times']).detach()[50:]
-                ch_names = data['ch_names']
-                n_cls, spc = 1654, 10
 
-                if self.classes is not None and self.pictures is not None:
-                    for c, p in zip(self.classes, self.pictures):
-                        si = c * 1 + p
-                        if si < len(eeg):
-                            data_list.append(eeg[si:si + 1])
+                file_path = os.path.join(
+                    self.data_path,
+                    subject,
+                    "preprocessed_eeg_training.npy",
+                )
+
+                data = np.load(
+                    file_path,
+                    allow_pickle=True,
+                )
+
+                eeg = torch.from_numpy(
+                    data["preprocessed_eeg_data"]
+                ).float().detach()
+
+                print(eeg.shape)
+
+                times = torch.from_numpy(
+                    data["times"]
+                ).detach()[50:]
+
+                ch_names = data["ch_names"]
+
+                n_classes = 1654
+                conditions_per_class = 10
+
+                if (
+                    self.classes is not None
+                    and self.pictures is not None
+                ):
+                    for class_index, picture_index in zip(
+                        self.classes,
+                        self.pictures,
+                    ):
+                        sample_index = (
+                            class_index * 1
+                            + picture_index
+                        )
+
+                        if sample_index < len(eeg):
+                            data_list.append(
+                                eeg[
+                                    sample_index:
+                                    sample_index + 1
+                                ]
+                            )
+
                             label_list.append(
-                                torch.full((1,), c, dtype=torch.long))
+                                torch.full(
+                                    (1,),
+                                    class_index,
+                                    dtype=torch.long,
+                                )
+                            )
+
                 elif self.classes is not None:
-                    for c in self.classes:
-                        si = c * spc
-                        chunk = eeg[si:si + spc]
+                    for class_index in self.classes:
+                        start_index = (
+                            class_index
+                            * conditions_per_class
+                        )
+
+                        chunk = eeg[
+                            start_index:
+                            start_index
+                            + conditions_per_class
+                        ]
+
                         if self.avg_trials:
                             chunk = chunk.mean(dim=1)
+
                         data_list.append(chunk)
+
                         label_list.append(
-                            torch.full((spc,), c, dtype=torch.long))
+                            torch.full(
+                                (conditions_per_class,),
+                                class_index,
+                                dtype=torch.long,
+                            )
+                        )
+
                 else:
-                    for i in range(n_cls):
-                        si = i * spc
-                        chunk = eeg[si:si + spc]
+                    for class_index in range(n_classes):
+                        start_index = (
+                            class_index
+                            * conditions_per_class
+                        )
+
+                        chunk = eeg[
+                            start_index:
+                            start_index
+                            + conditions_per_class
+                        ]
+
                         if self.avg_trials:
                             chunk = chunk.mean(dim=1)
+
                         data_list.append(chunk)
+
                         label_list.append(
-                            torch.full((spc,), i, dtype=torch.long))
+                            torch.full(
+                                (conditions_per_class,),
+                                class_index,
+                                dtype=torch.long,
+                            )
+                        )
+
             else:
-                if subject != self.exclude_subject and self.exclude_subject is not None:
+                if (
+                    self.exclude_subject is not None
+                    and subject != self.exclude_subject
+                ):
                     continue
-                fp = os.path.join(self.data_path, subject,
-                                  'preprocessed_eeg_test.npy')
-                data = np.load(fp, allow_pickle=True)
+
+                file_path = os.path.join(
+                    self.data_path,
+                    subject,
+                    "preprocessed_eeg_test.npy",
+                )
+
+                data = np.load(
+                    file_path,
+                    allow_pickle=True,
+                )
+
                 eeg = torch.from_numpy(
-                    data['preprocessed_eeg_data']).float().detach()
-                times = torch.from_numpy(data['times']).detach()[50:]
-                ch_names = data['ch_names']
+                    data["preprocessed_eeg_data"]
+                ).float().detach()
 
-                for i in range(200):
-                    if self.classes is not None and i not in self.classes:
+                times = torch.from_numpy(
+                    data["times"]
+                ).detach()[50:]
+
+                ch_names = data["ch_names"]
+
+                for class_index in range(200):
+                    if (
+                        self.classes is not None
+                        and class_index not in self.classes
+                    ):
                         continue
-                    chunk = eeg[i:i + 1]
-                    chunk = torch.mean(chunk.squeeze(0), 0)
+
+                    chunk = eeg[
+                        class_index:
+                        class_index + 1
+                    ]
+
+                    chunk = torch.mean(
+                        chunk.squeeze(0),
+                        dim=0,
+                    )
+
                     data_list.append(chunk)
-                    label_list.append(torch.full((1,), i, dtype=torch.long))
+
+                    label_list.append(
+                        torch.full(
+                            (1,),
+                            class_index,
+                            dtype=torch.long,
+                        )
+                    )
 
         if self.train:
-            data_tensor = torch.cat(data_list, dim=0)
+            data_tensor = torch.cat(
+                data_list,
+                dim=0,
+            )
+
             if not self.avg_trials:
-                # Flatten (conditions, 4_trials, C, T) → (samples, C, T)
-                data_tensor = data_tensor.view(-1, *data_tensor.shape[2:])
+                # (条件, 4 trials, C, T)
+                # → (サンプル, C, T)
+                data_tensor = data_tensor.view(
+                    -1,
+                    *data_tensor.shape[2:],
+                )
+
         else:
-            data_tensor = torch.cat(data_list, dim=0).view(
-                -1, *data_list[0].shape)
+            data_tensor = torch.cat(
+                data_list,
+                dim=0,
+            ).view(
+                -1,
+                *data_list[0].shape,
+            )
 
-        label_tensor = torch.cat(label_list, dim=0)
+        label_tensor = torch.cat(
+            label_list,
+            dim=0,
+        )
 
         if self.train:
             if not self.avg_trials:
-                label_tensor = label_tensor.repeat_interleave(4)
+                label_tensor = (
+                    label_tensor.repeat_interleave(4)
+                )
+
             if self.classes is not None:
-                uniq = []
-                for v in label_tensor.tolist():
-                    if v not in uniq:
-                        uniq.append(v)
-                mapping = {v: i for i, v in enumerate(uniq)}
+                unique_labels = []
+
+                for value in label_tensor.tolist():
+                    if value not in unique_labels:
+                        unique_labels.append(value)
+
+                mapping = {
+                    value: index
+                    for index, value
+                    in enumerate(unique_labels)
+                }
+
                 label_tensor = torch.tensor(
-                    [mapping[v.item() if hasattr(v, 'item') else v]
-                     for v in label_tensor],
-                    dtype=torch.long)
+                    [
+                        mapping[
+                            value.item()
+                            if hasattr(value, "item")
+                            else value
+                        ]
+                        for value in label_tensor
+                    ],
+                    dtype=torch.long,
+                )
 
         self.times = times
         self.ch_names = ch_names
-        print(f"EEG: {data_tensor.shape}  labels: {label_tensor.shape}  "
-              f"texts: {len(texts)}  images: {len(images)}")
-        return data_tensor, label_tensor, texts, images
+
+        print(
+            f"EEG: {data_tensor.shape} "
+            f"labels: {label_tensor.shape} "
+            f"texts: {len(texts)} "
+            f"images: {len(images)}"
+        )
+
+        return (
+            data_tensor,
+            label_tensor,
+            texts,
+            images,
+        )
+
+
 
     # ── Time-window extraction ────────────────────────────────────────────────
 
@@ -421,19 +719,85 @@ class EEGDataset(Dataset):
         return feats.detach()
 
     def _encode_images(self, image_paths):
-        model = _clip_state['model']
-        preprocess = _clip_state['preprocess']
-        dev = _clip_state['device']
+        model = _clip_state["model"]
+        preprocess = _clip_state["preprocess"]
+        dev = _clip_state["device"]
+        
+        # CLIP Projection後の1024次元特徴を抽出
+        if self.feature_space == "clip":
+            feats_list = []
+            batch_size = 20
+
+            for i in tqdm(
+                range(0, len(image_paths), batch_size),
+                desc="CLIP projected",
+            ):
+                batch = image_paths[
+                    i:i + batch_size
+                ]
+
+                imgs = torch.stack([
+                    preprocess(
+                        Image.open(path).convert("RGB")
+                    )
+                    for path in batch
+                ]).to(dev)
+
+                with torch.no_grad():
+                    features = model.encode_image(imgs)
+
+                feats_list.append(
+                    features.detach().float().cpu()
+                )
+
+            features = torch.cat(
+                feats_list,
+                dim=0,
+            )
+
+            print(
+                "CLIP features:",
+                features.shape,
+            )
+
+            return features
+
         feats_list = []
-        for i in range(0, len(image_paths), 20):
-            batch = image_paths[i:i + 20]
-            imgs = torch.stack(
-                [preprocess(Image.open(p).convert('RGB')) for p in batch]
-            ).to(dev)
-            with torch.no_grad():
-                # Raw (unnormalized) CLIP image features
-                feats_list.append(model.encode_image(imgs))
-        return torch.cat(feats_list, dim=0).detach()
+
+        def hook_fn(module, inputs, output):
+            features = output.detach()
+
+            if features.ndim == 3:
+                features = features[:, 0]
+
+            feats_list.append(features.float().cpu())
+
+        handle = model.visual.ln_post.register_forward_hook(hook_fn)
+
+        try:
+            batch_size = 1
+
+            for i in tqdm(
+                range(0, len(image_paths), batch_size),
+                desc="CLIP preprojection",
+            ):
+                batch = image_paths[i:i + batch_size]
+
+                imgs = torch.stack([
+                    preprocess(Image.open(p).convert("RGB"))
+                    for p in batch
+                ]).to(dev)
+
+                with torch.no_grad():
+                    model.encode_image(imgs)
+
+        finally:
+            handle.remove()
+
+        features = torch.cat(feats_list, dim=0)
+        print("Preprojection features:", features.shape)
+
+        return features
 
     # ── Dataset interface ─────────────────────────────────────────────────────
 
@@ -469,3 +833,4 @@ class EEGDataset(Dataset):
         img_feats = self.img_features[img_idx]
 
         return x, label, text, text_feats, img, img_feats
+

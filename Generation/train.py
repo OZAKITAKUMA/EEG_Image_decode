@@ -27,13 +27,14 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.optim import AdamW
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Subset, TensorDataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from eegdatasets import EEGDataset
 from diffusion_prior import DiffusionPriorUNet, EmbeddingDataset, Pipe
 from models.atms import ATMS, extract_id_from_string
+from models.eeg_clip_adapter import EEGCLIPAdapter
 
 # Shared encoder training utilities (generation loss mode: MSE + CLIP)
 from encoder_utils import (
@@ -70,11 +71,157 @@ def train_prior_one_epoch(pipe, dataloader):
         pipe._optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(pipe.diffusion_prior.parameters(), 1.0)
-        pipe._lr_scheduler.step()
         pipe._optimizer.step()
+        pipe._lr_scheduler.step()
         loss_sum += loss.item()
 
     return loss_sum / len(dataloader)
+
+@torch.no_grad()    
+def validate_prior_one_epoch(pipe, dataloader, seed=42,):
+    pipe.diffusion_prior.eval()
+    device = pipe.device
+    num_train_timesteps = pipe.scheduler.config.num_train_timesteps
+    generator = torch.Generator(device=device).manual_seed(seed)
+
+    loss_sum = 0.0
+    total_elements = 0
+
+    for batch in dataloader:
+        c_embeds = batch["c_embedding"].to(device)
+        h_embeds = batch["h_embedding"].to(device)
+
+        batch_size = h_embeds.shape[0]
+
+        noise = torch.randn(
+            h_embeds.shape,
+            dtype=h_embeds.dtype,
+            device=device,
+            generator=generator,
+        )
+
+        timesteps = torch.randint(
+            0,
+            num_train_timesteps,
+            (batch_size,),
+            device=device,
+            generator=generator,
+        )
+
+        perturbed_h_embeds = pipe.scheduler.add_noise(
+            h_embeds,
+            noise,
+            timesteps,
+        )
+
+        predicted_noise = pipe.diffusion_prior(
+            perturbed_h_embeds,
+            timesteps,
+            c_embeds,
+        )
+
+        # 全要素のMSEを合計
+        loss = nn.functional.mse_loss(
+            predicted_noise,
+            noise,
+            reduction="sum",
+        )
+
+        loss_sum += loss.item()
+        total_elements += noise.numel()
+
+    return loss_sum / total_elements
+
+def train_adapter_one_epoch(adapter, dataloader, optimizer, device):
+    # EEG cls tokenをCLIPに埋め込むためのprojをfine-tuning
+    adapter.train()
+    total_loss = 0.0
+
+    for eeg_cls, image_clip in dataloader:
+        eeg_cls = eeg_cls.to(device)
+        image_clip = image_clip.to(device)
+
+        # eegから作られたclip埋め込み
+        predicted = adapter(eeg_cls)
+        # 画像から作られた埋め込みとlossをとる
+        loss = compute_adapter_loss(predicted, image_clip,)
+
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+@torch.no_grad()
+def validate_adapter(adapter, dataloader, device,):
+    adapter.eval()
+    total_loss = 0.0
+
+    for eeg_cls, image_clip in dataloader:
+        eeg_cls = eeg_cls.to(device)
+        image_clip = image_clip.to(device)
+
+        predicted = adapter(eeg_cls)
+
+        loss = compute_adapter_loss(predicted, image_clip,)
+
+        total_loss += loss.item()
+
+    return total_loss / len(dataloader)
+
+def fit_adapter(adapter, train_eeg_cls, train_image_clip, val_eeg_cls, val_image_clip,
+                save_path, device, args):
+
+    # 教師; CLIPの特徴(1024次元) 予測:train_eeg_cls @ learnable_proj.(Adapter)
+    train_dataset = TensorDataset(train_eeg_cls, train_image_clip,)
+    val_dataset = TensorDataset(val_eeg_cls, val_image_clip)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.adapter_batch_size, shuffle=True,)
+    val_loader = DataLoader(val_dataset, batch_size=args.adapter_batch_size, shuffle=False)
+
+    optimizer = AdamW(adapter.parameters(), lr=args.adapter_lr)
+
+    best_val_loss = float("inf")
+    patience_counter = 0
+
+    for epoch in range(args.adapter_epochs):
+        train_loss = train_adapter_one_epoch(adapter, train_loader, optimizer, device,)
+        val_loss = validate_adapter(adapter, val_loader, device,)
+
+        print(
+            f"[Adapter] "
+            f"Epoch {epoch + 1}/{args.adapter_epochs} "
+            f"| Train L={train_loss:.6f} "
+            f"| Val L={val_loss:.6f}"
+        )
+
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            patience_counter = 0
+
+            torch.save(adapter.state_dict(), save_path)
+
+            print(
+                f"  ★ New best Adapter: "
+                f"val_loss={best_val_loss:.6f}"
+            )
+        else:
+            patience_counter += 1
+
+        if patience_counter >= args.adapter_patience:
+            print("[Adapter Early Stop]")
+            break
+
+    # 最もvalidation lossが小さかった重みを戻す
+    adapter.load_state_dict(
+        torch.load(save_path, map_location=device,))
+
+    adapter.eval()
+
+    for parameter in adapter.parameters():
+        parameter.requires_grad = False
 
 
 def setup_prior_optimizer(pipe, dataloader, num_epochs, learning_rate):
@@ -107,6 +254,21 @@ def extract_features_ordered(sub, eeg_model, dataloader, device):
             img_list.append(img_features.cpu())
     return torch.cat(eeg_list, 0), torch.cat(img_list, 0)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Adapter Loss Function
+# ─────────────────────────────────────────────────────────────────────────────
+def compute_adapter_loss(predicted, target):
+    """
+    predicted: Adapterを通したEEG特徴 (B, 1024)
+    target:    画像のCLIP特徴       (B, 1024)
+    """
+    mse_loss = nn.functional.mse_loss(predicted,target,)
+
+    cosine_loss = 1.0 - nn.functional.cosine_similarity(predicted, target, dim=1,).mean()
+
+    total_loss = mse_loss + cosine_loss
+
+    return total_loss
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -142,10 +304,40 @@ def main():
                         help='Early stopping patience (epochs without val improvement)')
     parser.add_argument('--encoder_finetuning', action='store_true',
                         help='If set, encoder keeps training jointly with prior in Phase 2')
+    parser.add_argument('--encoder_only', action='store_true',
+                        help='Train only the EEG encoder for --total_epochs; '
+                             'do not create, train, or save a Diffusion Prior')
     parser.add_argument('--avg_trials', action='store_true',
                         help='Average the 4 trials per condition into one signal '
                              'before training (reduces noise, shrinks dataset 4x).')
+    parser.add_argument("--train_adapter", action="store_true", help="Encoder学習後にAdapterを学習する",)
+    parser.add_argument("--adapter_epochs", type=int, default=50,)
+    parser.add_argument("--adapter_lr",type=float,default=1e-4,)
+    parser.add_argument("--adapter_batch_size",type=int,default=1024,)
+    parser.add_argument("--adapter_patience", type=int,default=10,)
+    parser.add_argument("--feature_space",choices=["clip", "cls"],default="cls",
+                        help=("Image feature space: ""'clip'=1024-D projected CLIP, ""'cls'=1280-D pre-projection CLS"),)
     args = parser.parse_args()
+
+    if args.train_adapter and args.feature_space != "cls":
+        raise ValueError(
+            "Adapter学習には--feature_space clsが必要です"
+        )
+
+    if args.train_adapter and args.encoder_finetuning:
+        raise ValueError(
+            "Adapter学習時はencoder_finetuningを無効にしてください"
+        )
+
+    if args.encoder_only and args.train_adapter:
+        raise ValueError(
+            "--encoder_onlyではAdapterを学習しません"
+        )
+
+    if args.encoder_only and args.encoder_finetuning:
+        raise ValueError(
+            "--encoder_onlyと--encoder_finetuningは同時に指定できません"
+        )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -153,11 +345,24 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
+
+    torch.use_deterministic_algorithms(True)
+
     device = torch.device(args.gpu if torch.cuda.is_available() else 'cpu')
     sub = args.subject
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
-    encoder_only_epochs = int(args.total_epochs * args.encoder_only_ratio)
+    encoder_only_epochs = (
+        args.total_epochs
+        if args.encoder_only
+        else int(args.total_epochs * args.encoder_only_ratio)
+    )
+    feature_dim = (1024 if args.feature_space == "clip" else 1280)
 
     # ── Data ─────────────────────────────────────────────────────────────
     full_train_dataset = EEGDataset(args.data_path,
@@ -165,8 +370,17 @@ def main():
                                     img_dir_test=args.img_dir_test,
                                     features_dir=args.features_dir,
                                     subjects=[sub], train=True,
-                                    avg_trials=args.avg_trials)
+                                    avg_trials=args.avg_trials,
+                                    feature_space=args.feature_space,
+)
     img_features_all = full_train_dataset.img_features          # (16540, 1024)
+    if img_features_all.shape[-1] != feature_dim:
+        raise RuntimeError(
+            "Image feature dimension mismatch: "
+            f"feature_space={args.feature_space}, "
+            f"expected={feature_dim}, "
+            f"actual={img_features_all.shape[-1]}"
+        )
     img_features_per_class = img_features_all[::10].clone()     # (1654, 1024)
 
     # Stratified split: 9 conditions → train, 1 condition → val (per class)
@@ -193,9 +407,15 @@ def main():
 
     print(f"=== Training Schedule ===")
     print(f"  Total epochs:    {args.total_epochs} (max)")
-    print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
-    print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
+    if args.encoder_only:
+        print(f"  Mode:            Encoder-only (Diffusion Prior disabled)")
+        print(f"  Encoder:         epoch 1 ~ {encoder_only_epochs}")
+    else:
+        print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
+        print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
     print(f"  Encoder finetuning: {finetune}")
+    print(f"  Feature space:   "f"{args.feature_space}")
+    print(f"  Feature dim:     "f"{feature_dim}")
     print(f"  Subject:         {sub}")
     print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
     print(f"  Val samples:     {len(val_indices)}  ({len(val_indices)/len(full_train_dataset)*100:.0f}%)")
@@ -203,27 +423,58 @@ def main():
     print(f"========================")
 
     # ── Models ───────────────────────────────────────────────────────────
-    eeg_model = ATMS()
+    eeg_model = ATMS(outputs_dim=feature_dim)
     eeg_model.to(device)
     encoder_optimizer = AdamW(eeg_model.parameters(), lr=args.lr_encoder)
 
-    diffusion_prior = DiffusionPriorUNet(cond_dim=1024, dropout=args.prior_dropout)
-    pipe = Pipe(diffusion_prior, device=device)
+    adapter = None
+
+    # Adapterのfine-tuning 
+    if args.train_adapter:
+        # Image Encoderのprojection層を読み込み
+        visual_projection = full_train_dataset.visual_projection
+
+        if visual_projection is None:
+            raise RuntimeError("visual_projectionが読み込まれていません")
+
+        print("Visual projection:", visual_projection.shape,)
+        # 期待する形：(1280, 1024)
+
+        adapter = EEGCLIPAdapter(visual_projection).to(device)
+
+
+    pipe = None
+    if not args.encoder_only:
+        diffusion_prior = DiffusionPriorUNet(
+            cond_dim=feature_dim,
+            embed_dim=feature_dim,
+            dropout=args.prior_dropout,
+        )
+        pipe = Pipe(diffusion_prior, device=device)
 
     # ── Directories ──────────────────────────────────────────────────────
     encoder_save_dir = os.path.join(args.model_save_dir, 'encoder', sub, current_time)
+    adapter_save_dir = os.path.join(args.model_save_dir, "adapter", sub, current_time)
     prior_save_dir = os.path.join(args.model_save_dir, 'prior', sub, current_time)
     results_dir = os.path.join(args.output_dir, sub, current_time)
     os.makedirs(encoder_save_dir, exist_ok=True)
-    os.makedirs(prior_save_dir, exist_ok=True)
+    if not args.encoder_only:
+        os.makedirs(prior_save_dir, exist_ok=True)
     os.makedirs(results_dir, exist_ok=True)
+    if args.train_adapter:
+        os.makedirs(adapter_save_dir, exist_ok=True)
+
+    adapter_best_path = ""
+
+    if args.train_adapter:
+        adapter_best_path = os.path.join(adapter_save_dir, "best.pth")
 
     # ── Training loop ────────────────────────────────────────────────────
     results = []
     best_val_loss = float('inf')
     best_val_acc = 0.0
     best_encoder_epoch = 0
-    best_prior_loss = float('inf')
+    best_prior_val_loss = float("inf")
     best_prior_epoch = 0
     patience_counter = 0
     prior_initialized = False
@@ -232,13 +483,19 @@ def main():
     phase2_started = False
 
     for epoch in range(args.total_epochs):
-        is_prior_phase = epoch >= encoder_only_epochs
+        is_prior_phase = (
+            not args.encoder_only
+            and epoch >= encoder_only_epochs
+        )
 
         # Skip remaining phase 1 epochs if encoder already early-stopped
         if not is_prior_phase and encoder_done:
+            if args.encoder_only:
+                break
             continue
 
         # ── Phase transition ──
+        # このif文は一回だけ入る
         if is_prior_phase and not phase2_started:
             best_enc_file = os.path.join(encoder_save_dir, 'best.pth')
             if os.path.exists(best_enc_file):
@@ -250,6 +507,65 @@ def main():
                     param.requires_grad = False
                 eeg_model.eval()
                 encoder_frozen = True
+
+            if args.train_adapter:
+                print("\n===== Phase 1.5: Adapter training =====")
+
+                # 最良Encoderを通してEEG CLS・画像CLSを一度だけ取得
+                train_eeg_cls, train_image_cls = (
+                    extract_features_ordered(
+                        sub,
+                        eeg_model,
+                        train_loader_ordered,
+                        device,
+                    )
+                )
+
+                val_eeg_cls, val_image_cls = (
+                    extract_features_ordered(
+                        sub,
+                        eeg_model,
+                        val_loader,
+                        device,
+                    )
+                )
+
+                print(
+                    "Train EEG CLS:",
+                    train_eeg_cls.shape,
+                )
+                print(
+                    "Train Image CLS:",
+                    train_image_cls.shape,
+                )
+
+                # 正解画像側だけ、凍結CLIP Projectionを通す
+                train_image_clip = (
+                    train_image_cls.float()
+                    @ visual_projection.float()
+                )
+
+                val_image_clip = (
+                    val_image_cls.float()
+                    @ visual_projection.float()
+                )
+
+                fit_adapter(
+                    adapter=adapter,
+                    train_eeg_cls=train_eeg_cls,
+                    train_image_clip=train_image_clip,
+                    val_eeg_cls=val_eeg_cls,
+                    val_image_clip=val_image_clip,
+                    save_path=adapter_best_path,
+                    device=device,
+                    args=args,
+                )
+
+                print(
+                    "[INFO] Adapter training finished:",
+                    adapter_best_path,
+                )
+            
 
             phase2_started = True
             patience_counter = 0
@@ -276,18 +592,31 @@ def main():
             )
 
         # 2. Phase 2: extract features & train prior
+        # diffusionのtrainとvalidationを行う
         prior_loss = None
+        prior_val_loss = None
         if is_prior_phase:
             if not finetune and not prior_initialized:
                 # Frozen encoder → features constant, extract once
-                eeg_feats, img_feats = extract_features_ordered(
-                    sub, eeg_model, full_train_loader_ordered, device)
-                prior_dataset = EmbeddingDataset(c_embeddings=eeg_feats, h_embeddings=img_feats)
-                prior_loader = DataLoader(prior_dataset, batch_size=args.prior_batch_size,
-                                          shuffle=True, num_workers=0)
+                # train用の特徴抽出
+                train_eeg_feats, train_img_feats = extract_features_ordered(
+                    sub, eeg_model, train_loader_ordered, device)
+                # valdation用の特徴抽出
+                val_eeg_feats, val_img_feats = extract_features_ordered(
+                    sub, eeg_model, val_loader, device)
+                
+                # 埋め込み特徴量をデータセットにまとめる
+                prior_train_dataset = EmbeddingDataset(c_embeddings=train_eeg_feats, h_embeddings=train_img_feats)
+                prior_val_dataset = EmbeddingDataset(c_embeddings=val_eeg_feats, h_embeddings=val_img_feats)
+                
+                # loaderにセットする
+                prior_loader = DataLoader(prior_train_dataset, batch_size=args.prior_batch_size, shuffle=True, num_workers=0)
+                prior_val_loader = DataLoader(prior_val_dataset, batch_size=args.prior_batch_size, shuffle=False, num_workers=0)
+                
                 remaining = args.total_epochs - encoder_only_epochs
                 setup_prior_optimizer(pipe, prior_loader, remaining, args.lr_prior)
                 prior_initialized = True
+
             elif finetune:
                 # Finetuning → encoder changes, re-extract every epoch
                 eeg_feats, img_feats = extract_features_ordered(
@@ -303,6 +632,8 @@ def main():
             for _ in range(args.prior_epochs_per_step):
                 prior_loss = train_prior_one_epoch(pipe, prior_loader)
 
+            prior_val_loss = validate_prior_one_epoch(pipe, prior_val_loader, seed=args.seed,)
+
         # 3. Evaluate on VALIDATION set (never test set)
         val_loss, val_acc = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
@@ -315,6 +646,7 @@ def main():
             "train_acc": f"{train_acc:.4f}" if train_acc is not None else "N/A",
             "val_loss": f"{val_loss:.4f}", "val_acc": f"{val_acc:.4f}",
             "prior_loss": f"{prior_loss:.4f}" if prior_loss is not None else "N/A",
+            "prior_val_loss": f"{prior_val_loss:.4f}" if prior_val_loss is not None else "N/A",
         }
         results.append(epoch_results)
 
@@ -329,8 +661,10 @@ def main():
                   f"| Val L={val_loss:.4f} A={val_acc:.4f}")
         else:
             print(f"[{phase_str}] Epoch {epoch+1}/{args.total_epochs} "
-                  f"| Prior L={prior_loss:.4f} "
-                  f"| Val L={val_loss:.4f} A={val_acc:.4f}")
+                  f"| Prior Train L={prior_loss:.4f} "
+                  f"| Prior Val L={prior_val_loss:.4f} "
+                  f"| Encoder Val L={val_loss:.4f} "
+                  f"A={val_acc:.4f}")
 
         # 5. Model selection & early stopping
         if not is_prior_phase:
@@ -362,13 +696,15 @@ def main():
                 patience_counter += 1
         else:
             # Phase 2 frozen: select best prior by prior_loss
-            if prior_loss < best_prior_loss:
-                best_prior_loss = prior_loss
+            # ファインチューニングじゃない場合かつpriorのモデル選択
+            if prior_val_loss < best_prior_val_loss:
+                best_prior_val_loss = prior_val_loss
                 best_prior_epoch = epoch + 1
                 patience_counter = 0
+
                 torch.save(pipe.diffusion_prior.state_dict(),
                            os.path.join(prior_save_dir, 'best.pth'))
-                print(f"  ★ New best prior: loss={best_prior_loss:.4f}")
+                print(f"  ★ New best prior: loss={best_prior_val_loss:.4f}")
             else:
                 patience_counter += 1
 
@@ -386,6 +722,9 @@ def main():
             if not is_prior_phase:
                 print(f"\n[Early Stop] No encoder improvement for {args.patience} epochs. "
                       f"Best encoder epoch = {best_encoder_epoch}.")
+                if args.encoder_only:
+                    print("[INFO] Encoder-only training finished by early stopping.")
+                    break
                 encoder_done = True
                 print("[INFO] Skipping to Phase 2...")
             else:
@@ -396,9 +735,11 @@ def main():
                 break
 
     # ── Ensure best checkpoints exist ─────────────────────────────────
-    best_prior_path = os.path.join(prior_save_dir, 'best.pth')
-    if not os.path.exists(best_prior_path):
-        torch.save(pipe.diffusion_prior.state_dict(), best_prior_path)
+    best_prior_path = ""
+    if not args.encoder_only:
+        best_prior_path = os.path.join(prior_save_dir, 'best.pth')
+        if not os.path.exists(best_prior_path):
+            torch.save(pipe.diffusion_prior.state_dict(), best_prior_path)
 
     best_encoder_path = os.path.join(encoder_save_dir, 'best.pth')
     if not os.path.exists(best_encoder_path):
@@ -407,15 +748,23 @@ def main():
     print(f"\n{'='*55}")
     print(f"Training finished at epoch {epoch+1}")
     print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
-    print(f"Best prior:   epoch {best_prior_epoch}  prior_loss={best_prior_loss:.4f}")
+    if not args.encoder_only:
+        print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
     print(f"  Encoder: {best_encoder_path}")
-    print(f"  Prior:   {best_prior_path}")
+    if args.train_adapter:
+        print(f"  Adapter: {adapter_best_path}")
+    if not args.encoder_only:
+        print(f"  Prior:   {best_prior_path}")
     print(f"{'='*55}")
 
     # ── Save training log ────────────────────────────────────────────────
     results_file = os.path.join(results_dir, 'training_log.csv')
     with open(results_file, 'w', newline='') as f:
-        writer = csv.DictWriter(f, fieldnames=results[0].keys())
+        writer = csv.DictWriter(
+        f,
+        fieldnames=results[0].keys(),
+        delimiter="\t",
+    )
         writer.writeheader()
         writer.writerows(results)
     print(f"Training log: {results_file}")
@@ -424,6 +773,7 @@ def main():
     info_path = os.path.join(results_dir, 'paths_info.txt')
     with open(info_path, 'w') as f:
         f.write(f"encoder_path={best_encoder_path}\n")
+        f.write(f"adapter_path={adapter_best_path}\n")
         f.write(f"prior_path={best_prior_path}\n")
         f.write(f"subject={sub}\n")
         f.write(f"timestamp={current_time}\n")
@@ -431,7 +781,10 @@ def main():
         f.write(f"best_val_loss={best_val_loss:.4f}\n")
         f.write(f"best_val_acc={best_val_acc:.4f}\n")
         f.write(f"best_prior_epoch={best_prior_epoch}\n")
-        f.write(f"best_prior_loss={best_prior_loss:.4f}\n")
+        f.write(f"best_prior_val_loss={best_prior_val_loss:.4f}\n")
+        f.write(f"feature_space="f"{args.feature_space}\n")
+        f.write(f"feature_dim="f"{feature_dim}\n")
+        f.write(f"encoder_only={str(args.encoder_only).lower()}\n")
     print(f"Paths info:   {info_path}")
 
 
