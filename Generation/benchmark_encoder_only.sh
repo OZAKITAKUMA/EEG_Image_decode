@@ -31,14 +31,10 @@ IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
 FEATURES_DIR="${FEATURES_DIR:-}"
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
-# Keep encoder-only artifacts separate from the original benchmark.
-MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only}"
-
 #==============================================================================
 # Experiment settings
 #==============================================================================
-SUBJECTS="${SUBJECTS:-sub-01}"
+SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
 RESUME="${RESUME:-}"
 
 ENCODER_EPOCHS="${ENCODER_EPOCHS:-100}"
@@ -50,11 +46,15 @@ PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
 
 # CLIP projected feature space (1024-D) is the default baseline.
-FEATURE_SPACE="${FEATURE_SPACE:-clip}"
+FEATURE_SPACE="${FEATURE_SPACE:-cls}"
 if [ "${FEATURE_SPACE}" != "clip" ] && [ "${FEATURE_SPACE}" != "cls" ]; then
     echo "[ERROR] FEATURE_SPACE must be clip or cls"
     exit 1
 fi
+# Keep encoder-only artifacts separate from the original benchmark.
+MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only/${FEATURE_SPACE}}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/${FEATURE_SPACE}}"
+
 
 NUM_GEN_PER_CLASS="${NUM_GEN_PER_CLASS:-1}"
 SDXL_INFERENCE_STEPS="${SDXL_INFERENCE_STEPS:-4}"
