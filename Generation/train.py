@@ -77,7 +77,7 @@ def train_prior_one_epoch(pipe, dataloader):
 
     return loss_sum / len(dataloader)
 
-@torch.no_grad()    
+@torch.no_grad()
 def validate_prior_one_epoch(pipe, dataloader, seed=42,):
     pipe.diffusion_prior.eval()
     device = pipe.device
@@ -287,6 +287,23 @@ def main():
                              'Defaults to EEG_Image_decode/features/ (shared with Retrieval). '
                              'Set explicitly only when you want a different cache location.')
     parser.add_argument('--subject', type=str, default='sub-08')
+    parser.add_argument(
+        '--train_subjects',
+        nargs='+',
+        default=None,
+        help='Subjects used for training. If omitted, use --subject.',
+    )
+    parser.add_argument(
+        '--exclude_subject',
+        type=str,
+        default=None,
+        help='Subject excluded from the training dataset.',
+    )
+    parser.add_argument(
+        '--no_subject_id',
+        action='store_true',
+        help='Disable subject-specific IDs and use a shared token.',
+    )
     parser.add_argument('--total_epochs', type=int, default=200)
     parser.add_argument('--encoder_only_ratio', type=float, default=0.25)
     parser.add_argument('--batch_size', type=int, default=64)
@@ -355,6 +372,25 @@ def main():
 
     device = torch.device(args.gpu if torch.cuda.is_available() else 'cpu')
     sub = args.subject
+    # コマンドライン引数が真ならlistなければ1人　現時点ではintra interの区別なし
+    train_subjects = (
+        list(args.train_subjects)
+        if args.train_subjects is not None
+        else [sub]
+    )
+    # 除外被験者がある場合、除外 type(train_subjects) : list
+    if args.exclude_subject is not None:
+        train_subjects = [
+            subject
+            for subject in train_subjects
+            if subject != args.exclude_subject
+        ]
+    # 例外処理
+    if not train_subjects:
+        raise ValueError(
+            "No training subjects remain after exclusion."
+        )
+
     current_time = datetime.datetime.now().strftime("%m-%d_%H-%M")
 
     encoder_only_epochs = (
@@ -369,7 +405,9 @@ def main():
                                     img_dir_training=args.img_dir_training,
                                     img_dir_test=args.img_dir_test,
                                     features_dir=args.features_dir,
-                                    subjects=[sub], train=True,
+                                    subjects=train_subjects,
+                                    exclude_subject=args.exclude_subject,
+                                    train=True,
                                     avg_trials=args.avg_trials,
                                     feature_space=args.feature_space,
 )
@@ -385,10 +423,46 @@ def main():
 
     # Stratified split: 9 conditions → train, 1 condition → val (per class)
     tpc = 1 if args.avg_trials else 4
-    train_indices, val_indices = stratified_condition_split(
-        n_classes=1654, conditions_per_class=10,
-        trials_per_condition=tpc, val_ratio=args.val_ratio, seed=args.seed,
+
+    # base_val_indices = [3, ...]
+    # base_train_indices = [0, 1, 2, 4, 5, 6, 7, 8, 9, ...]
+    base_train_indices, base_val_indices = stratified_condition_split(n_classes=1654,
+                                                            conditions_per_class=10,
+                                                            trials_per_condition=tpc, val_ratio=args.val_ratio, seed=args.seed,
     )
+
+
+    samples_per_subject = 1654 * 10 * tpc
+    #　被験者数 × 一人当たりのサンプル数
+    # train_subjects = ["sub-01","sub-02","sub-03","sub-04","sub-05","sub-06","sub-07","sub-09","sub-10",]
+
+    # 9被験者を正しく読み込めていれば、Dataset全体は148860サンプルになるはず・例外処理
+    expected_total_samples = (samples_per_subject * len(train_subjects))
+    if len(full_train_dataset) != expected_total_samples:
+        raise RuntimeError(
+            "Unexpected multi-subject dataset size: "
+            f"expected={expected_total_samples}, "
+            f"actual={len(full_train_dataset)}"
+        )
+
+    train_indices = []
+    val_indices = []
+
+    # 被験者でfor roop
+    # 上のリストにオフセットを足しながら被験者ひとまとめのインデックスを作る
+    for subject_index in range(len(train_subjects)):
+        # ex. index = 4 16540 参加者ごとに同じサンプルインデックスを選びたい。
+        offset = subject_index * samples_per_subject
+
+        train_indices.extend(
+            offset + index
+            for index in base_train_indices
+        )
+        val_indices.extend(
+            offset + index
+            for index in base_val_indices
+        )
+
     train_subset = Subset(full_train_dataset, train_indices)
     val_subset = Subset(full_train_dataset, val_indices)
 
@@ -405,22 +479,46 @@ def main():
     finetune = args.encoder_finetuning
     phase2_desc = "encoder + prior jointly" if finetune else "encoder frozen, prior only"
 
-    print(f"=== Training Schedule ===")
-    print(f"  Total epochs:    {args.total_epochs} (max)")
+    print("=== Training Schedule ===")
+    print(f"  Total epochs:      {args.total_epochs} (max)")
+
     if args.encoder_only:
-        print(f"  Mode:            Encoder-only (Diffusion Prior disabled)")
-        print(f"  Encoder:         epoch 1 ~ {encoder_only_epochs}")
+        print("  Mode:              Encoder-only (Diffusion Prior disabled)")
+        print(f"  Encoder:           epoch 1 ~ {encoder_only_epochs}")
     else:
-        print(f"  Phase 1 (encoder):  epoch 1 ~ {encoder_only_epochs}  [encoder trains, prior frozen]")
-        print(f"  Phase 2:            epoch {encoder_only_epochs + 1} ~ {args.total_epochs}  [{phase2_desc}]")
-    print(f"  Encoder finetuning: {finetune}")
-    print(f"  Feature space:   "f"{args.feature_space}")
-    print(f"  Feature dim:     "f"{feature_dim}")
-    print(f"  Subject:         {sub}")
-    print(f"  Train samples:   {len(train_indices)}  ({len(train_indices)/len(full_train_dataset)*100:.0f}%)")
-    print(f"  Val samples:     {len(val_indices)}  ({len(val_indices)/len(full_train_dataset)*100:.0f}%)")
-    print(f"  Early stopping:  patience = {args.patience} epochs")
-    print(f"========================")
+        print(
+            f"  Phase 1 (encoder): epoch 1 ~ {encoder_only_epochs} "
+            "[encoder trains, prior frozen]"
+        )
+        print(
+            f"  Phase 2:           epoch {encoder_only_epochs + 1} "
+            f"~ {args.total_epochs} [{phase2_desc}]"
+        )
+
+    print(f"  Encoder finetuning:{finetune}")
+    print(f"  Feature space:     {args.feature_space}")
+    print(f"  Feature dim:       {feature_dim}")
+    print(f"  Target subject:    {sub}")
+    print(f"  Train subjects:    {', '.join(train_subjects)}")
+    print(f"  Excluded subject:  {args.exclude_subject}")
+    print(
+        "  Subject ID:       "
+        + (
+            "disabled (shared token)"
+            if args.no_subject_id
+            else "enabled"
+        )
+    )
+    print(
+        f"  Train samples:     {len(train_indices)} "
+        f"({len(train_indices) / len(full_train_dataset) * 100:.0f}%)"
+    )
+    print(
+        f"  Val samples:       {len(val_indices)} "
+        f"({len(val_indices) / len(full_train_dataset) * 100:.0f}%)"
+    )
+    print(f"  Early stopping:    patience = {args.patience} epochs")
+    print("========================")
 
     # ── Models ───────────────────────────────────────────────────────────
     eeg_model = ATMS(outputs_dim=feature_dim)
@@ -429,7 +527,7 @@ def main():
 
     adapter = None
 
-    # Adapterのfine-tuning 
+    # Adapterのfine-tuning
     if args.train_adapter:
         # Image Encoderのprojection層を読み込み
         visual_projection = full_train_dataset.visual_projection
@@ -565,7 +663,7 @@ def main():
                     "[INFO] Adapter training finished:",
                     adapter_best_path,
                 )
-            
+
 
             phase2_started = True
             patience_counter = 0
@@ -589,6 +687,7 @@ def main():
                 sub, eeg_model, train_loader, encoder_optimizer, device,
                 img_features_per_class,
                 loss_mode='generation', alpha=0.90,
+                use_subject_id=not args.no_subject_id,
             )
 
         # 2. Phase 2: extract features & train prior
@@ -604,15 +703,15 @@ def main():
                 # valdation用の特徴抽出
                 val_eeg_feats, val_img_feats = extract_features_ordered(
                     sub, eeg_model, val_loader, device)
-                
+
                 # 埋め込み特徴量をデータセットにまとめる
                 prior_train_dataset = EmbeddingDataset(c_embeddings=train_eeg_feats, h_embeddings=train_img_feats)
                 prior_val_dataset = EmbeddingDataset(c_embeddings=val_eeg_feats, h_embeddings=val_img_feats)
-                
+
                 # loaderにセットする
                 prior_loader = DataLoader(prior_train_dataset, batch_size=args.prior_batch_size, shuffle=True, num_workers=0)
                 prior_val_loader = DataLoader(prior_val_dataset, batch_size=args.prior_batch_size, shuffle=False, num_workers=0)
-                
+
                 remaining = args.total_epochs - encoder_only_epochs
                 setup_prior_optimizer(pipe, prior_loader, remaining, args.lr_prior)
                 prior_initialized = True
@@ -637,7 +736,8 @@ def main():
         # 3. Evaluate on VALIDATION set (never test set)
         val_loss, val_acc = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
-            k=200, loss_mode='generation', alpha=0.99)
+            k=200, loss_mode='generation', alpha=0.99,
+            use_subject_id=not args.no_subject_id,)
 
         # 4. Logging
         epoch_results = {

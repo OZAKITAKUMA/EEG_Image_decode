@@ -50,6 +50,31 @@ def _extract_subject_id(sub: str) -> int:
     match = re.search(r'\d+$', sub)
     return int(match.group()) if match else 0
 
+def _make_subject_ids(
+    sub,
+    model,
+    batch_size,
+    device,
+    use_subject_id,
+):
+    if use_subject_id:
+        subject_id = _extract_subject_id(sub)
+    else:
+        embedding_layer = (
+            model.encoder
+            .enc_embedding
+            .subject_embedding
+            .subject_embedding
+        )
+        subject_id = embedding_layer.num_embeddings
+
+    return torch.full(
+        (batch_size,),
+        subject_id,
+        dtype=torch.long,
+        device=device,
+    )
+
 
 def _compute_loss(eeg_features, img_features, logit_scale, loss_func,
                   loss_mode: str, alpha: float,
@@ -135,6 +160,7 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
                         img_features_all, *,
                         loss_mode: str,
                         alpha: float,
+                        use_subject_id: bool = True,
                         text_features_all=None):
     """
     Train the ATMS encoder for one epoch.
@@ -163,7 +189,7 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
     # if loss_mode == 'generation':
     #     img_pool = img_pool[::10]
 
-    subject_id = _extract_subject_id(sub)
+    # subject_id = _extract_subject_id(sub)
     total_loss = 0.0
     correct = 0
     total = 0
@@ -177,8 +203,13 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
         optimizer.zero_grad()
 
         batch_size  = eeg_data.size(0)
-        subject_ids = torch.full((batch_size,), subject_id,
-                                  dtype=torch.long, device=device)
+        subject_ids = _make_subject_ids(
+        sub=sub,
+        model=model,
+        batch_size=batch_size,
+        device=device,
+        use_subject_id=use_subject_id,
+        )
         eeg_features = model(eeg_data, subject_ids).float()
 
         loss = _compute_loss(
@@ -209,6 +240,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
                      k: int = 200,
                      loss_mode: str,
                      alpha: float,
+                     use_subject_id: bool = True,
                      text_features_all=None):
     """
     Evaluate the ATMS encoder on a validation or test split.
@@ -225,7 +257,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
     img_pool = img_features_all.to(device).float()
     all_classes = set(range(img_pool.size(0)))
 
-    subject_id = _extract_subject_id(sub)
+    # subject_id = _extract_subject_id(sub)
     total_loss = 0.0
     correct = 0
     total = 0
@@ -237,8 +269,13 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
         txt_feats = text_feats.to(device).float() if loss_mode == 'retrieval' else None
 
         batch_size  = eeg_data.size(0)
-        subject_ids = torch.full((batch_size,), subject_id,
-                                  dtype=torch.long, device=device)
+        subject_ids = _make_subject_ids(
+        sub=sub,
+        model=model,
+        batch_size=batch_size,
+        device=device,
+        use_subject_id=use_subject_id,
+        )
         eeg_features = model(eeg_data, subject_ids).float()
 
         loss = _compute_loss(
