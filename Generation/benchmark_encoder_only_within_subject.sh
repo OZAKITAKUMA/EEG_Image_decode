@@ -46,7 +46,7 @@ PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
 
 # CLIP projected feature space (1024-D) is the default baseline.
-FEATURE_SPACE="${FEATURE_SPACE:-cls}"
+FEATURE_SPACE="${FEATURE_SPACE:-clip}"
 if [ "${FEATURE_SPACE}" != "clip" ] && [ "${FEATURE_SPACE}" != "cls" ]; then
     echo "[ERROR] FEATURE_SPACE must be clip or cls"
     exit 1
