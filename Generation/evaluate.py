@@ -600,7 +600,10 @@ def main():
         # 簡易的な検索タスク実行 # 
         eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
         img_norm = F.normalize(img_features_test_all.float(), dim=1)
+        print(eeg_norm.shape)
 
+        exit()
+        
         similarity = eeg_norm @ img_norm.T
 
         pred_top1 = similarity.argmax(dim=1)
