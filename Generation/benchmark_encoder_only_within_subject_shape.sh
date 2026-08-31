@@ -34,7 +34,7 @@ VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 #==============================================================================
 # Experiment settings
 #==============================================================================
-SUBJECTS="${SUBJECTS:-sub-01}"
+SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
 RESUME="${RESUME:-}"
 
 ENCODER_EPOCHS="${ENCODER_EPOCHS:-100}"
@@ -59,7 +59,6 @@ OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/trash}"
 NUM_GEN_PER_CLASS="${NUM_GEN_PER_CLASS:-1}"
 SDXL_INFERENCE_STEPS="${SDXL_INFERENCE_STEPS:-4}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-8}"
-
 GPU="${GPU:-cuda:0}"
 SEED="${SEED:-42}"
 export PYTHONHASHSEED="${SEED}"
@@ -86,6 +85,7 @@ echo "  Diffusion Prior: disabled"
 echo "  Seed:            ${SEED}"
 echo "  GPU:             ${GPU}"
 echo "  Output dir:      ${OUTPUT_DIR}"
+
 if [ -n "${RESUME}" ]; then
     echo "  RESUME:          ${RESUME} (skip training)"
 fi
@@ -157,6 +157,8 @@ for SUBJECT in ${SUBJECTS}; do
     if [ -n "${IP_ADAPTER_PATH}" ]; then
         EVAL_CMD+=(--ip_adapter_path "${IP_ADAPTER_PATH}")
     fi
+
+    EVAL_CMD+=("$@")
 
     echo "  [STEP 2] Encoder-only generation and evaluation ..."
     "${EVAL_CMD[@]}"
