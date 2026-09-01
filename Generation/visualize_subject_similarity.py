@@ -5,6 +5,8 @@ from representation_analysis import (
     load_subject_features,
     compute_subject_cosine_matrix,
     plot_subject_cosine_heatmap,
+    compute_subject_rsa_matrix,
+    plot_subject_rsa_heatmap,
 )
 
 
@@ -24,8 +26,7 @@ def main():
         "--output_path",
         type=str,
         default="./outputs/benchmark_encoder_only/clip/"
-                "representation_analysis/"
-                "subject_cosine_heatmap.png",
+                "representation_analysis/",
         help="Path to save the cosine similarity heatmap",
     )
 
@@ -59,15 +60,32 @@ def main():
         args.subjects,
     )
 
+    rsa_matrix = compute_subject_rsa_matrix(
+        features,
+        args.subjects,
+    )
+
+
     print("\nSubject cosine similarity matrix:")
     print(similarity_matrix)
+
+    print(rsa_matrix)
+    print(rsa_matrix.shape)
+
 
     plot_subject_cosine_heatmap(
         similarity_matrix,
         args.subjects,
-        output_path=args.output_path,
+        output_path=os.path.join(args.output_path, "subject_cosine_heatmap.png"),
     )
 
+    plot_subject_rsa_heatmap(
+        rsa_matrix,
+        args.subjects,
+        output_path=os.path.join(args.output_path, "subject_rsa_heatmap.png"),
+    )
 
 if __name__ == "__main__":
     main()
+
+# このファイルを実行するときは　Generationディレクトリに入ってから
