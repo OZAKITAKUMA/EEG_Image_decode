@@ -3,6 +3,7 @@ import os
 import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
+import json
 
 def load_subject_features(feature_dir, subjects):
     """
@@ -219,6 +220,37 @@ def compute_rdm(features):
 
     return rdm
 
+def compute_cosine_rdm(features):
+    """
+    features:
+        Tensor [N, D]
+
+    returns:
+        rdm:
+            Tensor [N, N]
+            cosine distance = 1 - cosine similarity
+    """
+
+    # 各刺激特徴をL2正規化
+    # [N, D] -> [N, D]
+    normalized_features = F.normalize(
+        features,
+        dim=1,
+    )
+
+    # 全刺激ペアのcosine similarity
+    # [N, D] @ [D, N]
+    #       ↓
+    #    [N, N]
+    cosine_similarity = (
+        normalized_features
+        @ normalized_features.T
+    )
+
+    # similarity -> distance
+    rdm = 1.0 - cosine_similarity
+
+    return rdm
 
 def compute_rsa_similarity(rdm_a, rdm_b):
     """
@@ -341,6 +373,62 @@ def compute_subject_rsa_matrix(features, subjects):
 
     return rsa_matrix
 
+def compute_subject_cosine_rsa_matrix(
+    features,
+    subjects,
+):
+    """
+    全被験者についてcosine-distance RDMを作成し、
+    被験者ペアごとのRSA similarityを計算する。
+
+    Args:
+        features:
+            {
+                "sub01": Tensor [N, D],
+                "sub02": Tensor [N, D],
+                ...
+            }
+
+        subjects:
+            ["sub01", "sub02", ...]
+
+    Returns:
+        rsa_matrix:
+            Tensor [num_subjects, num_subjects]
+    """
+
+    rdms = {}
+
+    # 各被験者のcosine-distance RDMを作る
+    for subject in subjects:
+        rdms[subject] = compute_cosine_rdm(
+            features[subject]
+        )
+
+        print(
+            f"Cosine RDM {subject}: "
+            f"{tuple(rdms[subject].shape)}"
+        )
+
+    num_subjects = len(subjects)
+
+    rsa_matrix = torch.empty(
+        num_subjects,
+        num_subjects,
+        dtype=torch.float32,
+    )
+
+    # 全被験者ペアについてRDM同士をRSA
+    for i, subject_i in enumerate(subjects):
+        for j, subject_j in enumerate(subjects):
+
+            rsa_matrix[i, j] = compute_rsa_similarity(
+                rdms[subject_i],
+                rdms[subject_j],
+            )
+
+    return rsa_matrix
+
 def plot_subject_rsa_heatmap(
     rsa_matrix,
     subjects,
@@ -414,3 +502,391 @@ def plot_subject_rsa_heatmap(
         )
 
     return fig
+
+def compute_subject_to_clip_rsa(features, clip_features, subjects,):
+    clip_rdm = compute_rdm(clip_features)
+
+    rsa_scores = []
+
+    for subject in subjects:
+        feature = features[subject]
+
+        target_rdm = compute_rdm(feature)
+
+        rsa_with_clip = compute_rsa_similarity(
+            clip_rdm,
+            target_rdm,
+        )
+
+        rsa_scores.append(rsa_with_clip)
+
+    # listに入れたscalar Tensorを
+    # [10] Tensorにまとめる
+    rsa_scores = torch.stack(rsa_scores)
+
+    return rsa_scores, clip_rdm
+
+def compute_subject_to_clip_cosine_rsa(
+    features,
+    clip_features,
+    subjects,
+):
+    """
+    各被験者モデルの特徴と正解CLIP特徴について
+    cosine-distance RDMを作り、
+    RDM同士のRSA similarityを計算する。
+
+    Returns:
+        rsa_scores:
+            Tensor [num_subjects]
+
+        clip_rdm:
+            正解CLIPのcosine-distance RDM [N, N]
+    """
+
+    clip_rdm = compute_cosine_rdm(
+        clip_features
+    )
+
+    rsa_scores = []
+
+    for subject in subjects:
+        feature = features[subject]
+
+        target_rdm = compute_cosine_rdm(
+            feature
+        )
+
+        rsa_with_clip = compute_rsa_similarity(
+            clip_rdm,
+            target_rdm,
+        )
+
+        rsa_scores.append(
+            rsa_with_clip
+        )
+
+    rsa_scores = torch.stack(
+        rsa_scores
+    )
+
+    return rsa_scores, clip_rdm
+
+
+
+def plot_clip_rdm_heatmap(
+    clip_rdm,
+    output_path=None,
+):
+    """
+    正解CLIP特徴から作成したRDMを可視化する。
+
+    Args:
+        clip_rdm:
+            Tensor [N, N]
+            各要素は刺激ペア間の二乗ユークリッド距離
+
+        output_path:
+            保存先。Noneなら保存しない。
+
+    Returns:
+        fig:
+            matplotlibのFigure
+    """
+
+    # Tensor -> NumPy
+    matrix = clip_rdm.detach().cpu().numpy()
+
+    # FigureとAxesを作成
+    fig, ax = plt.subplots(
+        figsize=(8, 7)
+    )
+
+    # RDMを画像として表示
+    image = ax.imshow(
+        matrix
+    )
+
+    # 軸ラベル
+    ax.set_xlabel("Stimulus index")
+    ax.set_ylabel("Stimulus index")
+
+    # タイトル
+    ax.set_title(
+        "Ground-truth CLIP RDM"
+    )
+
+    # カラーバー
+    fig.colorbar(
+        image,
+        ax=ax,
+        label="Squared Euclidean distance",
+    )
+
+    # レイアウト調整
+    fig.tight_layout()
+
+    # 保存先が指定されている場合のみ保存
+    if output_path is not None:
+
+        output_dir = os.path.dirname(
+            output_path
+        )
+
+        if output_dir:
+            os.makedirs(
+                output_dir,
+                exist_ok=True,
+            )
+
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+        print(
+            f"Saved CLIP RDM: {output_path}"
+        )
+
+    return fig
+
+def plot_clip_cosine_rdm_heatmap(
+    clip_rdm,
+    output_path=None,
+):
+    """
+    正解CLIP特徴のcosine-distance RDMを可視化する。
+
+    Args:
+        clip_rdm:
+            Tensor [N, N]
+            cosine distance = 1 - cosine similarity
+
+        output_path:
+            保存先。Noneなら保存しない。
+    """
+
+    matrix = clip_rdm.detach().cpu().numpy()
+
+    fig, ax = plt.subplots(
+        figsize=(8, 7)
+    )
+
+    image = ax.imshow(
+        matrix,
+        vmin=0.0,
+        vmax=2.0,
+    )
+
+    ax.set_xlabel("Stimulus index")
+    ax.set_ylabel("Stimulus index")
+
+    ax.set_title(
+        "Ground-truth CLIP cosine-distance RDM"
+    )
+
+    fig.colorbar(
+        image,
+        ax=ax,
+        label="Cosine distance",
+    )
+
+    fig.tight_layout()
+
+    if output_path is not None:
+        output_dir = os.path.dirname(
+            output_path
+        )
+
+        if output_dir:
+            os.makedirs(
+                output_dir,
+                exist_ok=True,
+            )
+
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+        print(
+            f"Saved CLIP cosine RDM: {output_path}"
+        )
+
+    return fig
+
+def load_semantic_groups(group_path):
+    with open(group_path, "r") as f:
+        semantic_groups = json.load(f)
+
+    return semantic_groups
+
+def make_grouped_indices(semantic_groups):
+
+    grouped_indices = []
+
+    for group_name, folder_ids in semantic_groups.items():
+
+        for folder_id in folder_ids:
+
+            grouped_indices.append(
+                folder_id - 1
+            )
+
+    return grouped_indices
+
+def plot_grouped_rdm_heatmap(
+    rdm,
+    semantic_groups,
+    title,
+    output_path=None,
+    distance_label="Squared Euclidean distance",
+):
+    """
+    RDMを意味カテゴリ順に並べ替えて可視化する。
+
+    Args:
+        rdm:
+            Tensor [N, N]
+
+        semantic_groups:
+            {
+                "mammals": [2, 12, ...],
+                "birds": [58, 69, ...],
+                ...
+            }
+
+        title:
+            図のタイトル
+
+        output_path:
+            保存先。Noneなら保存しない。
+
+    Returns:
+        fig:
+            matplotlib Figure
+
+        reordered_rdm:
+            意味カテゴリ順へ並べ替えたRDM [N, N]
+    """
+
+    grouped_indices = make_grouped_indices(
+        semantic_groups
+    )
+
+    # 200刺激すべてが1回ずつ含まれているか確認
+    if len(grouped_indices) != rdm.shape[0]:
+        raise ValueError(
+            f"Number of grouped indices ({len(grouped_indices)}) "
+            f"does not match RDM size ({rdm.shape[0]})"
+        )
+
+    if len(set(grouped_indices)) != len(grouped_indices):
+        raise ValueError(
+            "Duplicate stimulus indices found in semantic_groups."
+        )
+
+    # list -> Tensor index
+    index = torch.tensor(
+        grouped_indices,
+        dtype=torch.long,
+        device=rdm.device,
+    )
+
+    # 行と列を同じ意味カテゴリ順へ並べ替える
+    # [N, N] -> [N, N]
+    reordered_rdm = (
+        rdm
+        .index_select(0, index)
+        .index_select(1, index)
+    )
+
+    matrix = reordered_rdm.detach().cpu().numpy()
+
+    fig, ax = plt.subplots(
+        figsize=(12, 10)
+    )
+
+    image = ax.imshow(
+        matrix
+    )
+
+    # 各カテゴリ名を置く中心位置
+    group_centers = []
+    group_names = []
+
+    start = 0
+
+    for group_name, folder_ids in semantic_groups.items():
+        group_size = len(folder_ids)
+        end = start + group_size
+
+        center = (start + end - 1) / 2
+
+        group_centers.append(center)
+        group_names.append(group_name)
+
+        # カテゴリ境界線
+        if end < len(grouped_indices):
+            boundary = end - 0.5
+
+            ax.axhline(
+                boundary,
+                linewidth=0.8,
+            )
+
+            ax.axvline(
+                boundary,
+                linewidth=0.8,
+            )
+
+        start = end
+
+    ax.set_xticks(group_centers)
+    ax.set_yticks(group_centers)
+
+    ax.set_xticklabels(
+        group_names,
+        rotation=90,
+    )
+
+    ax.set_yticklabels(
+        group_names,
+    )
+
+    ax.set_xlabel("Semantic group")
+    ax.set_ylabel("Semantic group")
+    ax.set_title(title)
+
+    fig.colorbar(
+        image,
+        ax=ax,
+        label=distance_label,
+    )
+
+    fig.tight_layout()
+
+    if output_path is not None:
+        output_dir = os.path.dirname(
+            output_path
+        )
+
+        if output_dir:
+            os.makedirs(
+                output_dir,
+                exist_ok=True,
+            )
+
+        fig.savefig(
+            output_path,
+            dpi=300,
+            bbox_inches="tight",
+        )
+
+        print(
+            f"Saved grouped RDM: {output_path}"
+        )
+
+    return fig, reordered_rdm
