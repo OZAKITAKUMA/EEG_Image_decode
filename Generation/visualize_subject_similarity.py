@@ -15,6 +15,9 @@ from representation_analysis import (
     compute_subject_to_clip_cosine_rsa,
     compute_subject_cosine_rsa_matrix,
     plot_clip_cosine_rdm_heatmap,
+    compute_subject_to_clip_matched_cosine,
+    compute_subject_matched_vs_unmatched_cosine,
+    compute_mean_centered_subject_cosine_matrix,
 )
 
 
@@ -112,6 +115,30 @@ def main():
         )
     )
 
+    matched_cosine_scores, matched_cosine_per_stimulus = (
+        compute_subject_to_clip_matched_cosine(
+            features,
+            clip_feature,
+            args.subjects,
+        )
+    )
+
+    matched_vs_unmatched_results = (
+        compute_subject_matched_vs_unmatched_cosine(
+            features,
+            clip_feature,
+            args.subjects,
+        )
+    )
+
+    mean_centered_cosine_matrix = (
+        compute_mean_centered_subject_cosine_matrix(
+            features,
+            args.subjects,
+        )
+    )
+
+
     print(
     "\nRSA similarity to ground-truth CLIP RDM "
     "(squared Euclidean):"
@@ -158,11 +185,100 @@ def main():
         f"{cosine_rsa_scores.mean().item():.4f}"
     )
 
+    print("\n===== Matched prediction vs ground-truth CLIP cosine =====")
 
+    for subject, mean_score in zip(
+        args.subjects,
+        matched_cosine_scores,
+    ):
+        stimulus_scores = (
+            matched_cosine_per_stimulus[subject]
+        )
+
+        print(
+            f"{subject}: "
+            f"mean={mean_score.item():.4f}, "
+            f"std={stimulus_scores.std().item():.4f}, "
+            f"min={stimulus_scores.min().item():.4f}, "
+            f"max={stimulus_scores.max().item():.4f}"
+        )
+
+    print(
+        f"Mean across subjects: "
+        f"{matched_cosine_scores.mean().item():.4f}"
+    )
+
+    print(
+        f"Min subject mean:     "
+        f"{matched_cosine_scores.min().item():.4f}"
+    )
+
+    print(
+        f"Max subject mean:     "
+        f"{matched_cosine_scores.max().item():.4f}"
+    )
+
+    print(
+    "\n===== Matched vs unmatched CLIP cosine ====="
+)
+
+    for subject in args.subjects:
+        result = matched_vs_unmatched_results[subject]
+
+        print(
+            f"{subject}: "
+            f"matched={result['matched_mean'].item():.4f}, "
+            f"unmatched={result['unmatched_mean'].item():.4f}, "
+            f"margin={result['margin'].item():.4f}, "
+            f"top1={result['top1'].item():.4f}"
+        )
+
+
+    print(
+        "\n===== Mean-centered cross-subject cosine ====="
+    )
+
+    for i, subject in enumerate(args.subjects):
+        row = " ".join(
+            f"{value.item():.3f}"
+            for value in mean_centered_cosine_matrix[i]
+        )
+
+        print(
+            f"{subject}: {row}"
+        )
+
+    num_subjects = len(args.subjects)
+
+    off_diagonal_mask = ~torch.eye(
+        num_subjects,
+        dtype=torch.bool,
+    )
+
+    mean_centered_off_diagonal = (
+        mean_centered_cosine_matrix[
+            off_diagonal_mask
+        ]
+    )
+
+    print(
+        f"\nMean-centered off-diagonal mean: "
+        f"{mean_centered_off_diagonal.mean().item():.4f}"
+    )
+    
     plot_subject_cosine_heatmap(
         similarity_matrix,
         args.subjects,
         output_path=os.path.join(args.output_path, "subject_cosine_heatmap.png"),
+    )
+
+    plot_subject_cosine_heatmap(
+        mean_centered_cosine_matrix,
+        args.subjects,
+        output_path=os.path.join(
+            args.output_path,
+            "subject_mean_centered_cosine_heatmap.png",
+        ),
     )
 
     plot_subject_rsa_heatmap(

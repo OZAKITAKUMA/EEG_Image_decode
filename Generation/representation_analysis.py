@@ -572,7 +572,180 @@ def compute_subject_to_clip_cosine_rsa(
 
     return rsa_scores, clip_rdm
 
+def compute_subject_to_clip_matched_cosine(
+    features,
+    clip_features,
+    subjects,
+):
+    """
+    各被験者モデルの予測特徴と、
+    同じ刺激の正解CLIP特徴を直接cosineで比較する。
 
+    features[subject]:
+        Tensor [N, D]
+
+    clip_features:
+        Tensor [N, D]
+
+    Returns:
+        mean_scores:
+            Tensor [num_subjects]
+
+        stimulus_scores:
+            {
+                "sub01": Tensor [N],
+                ...
+            }
+    """
+
+    clip_normalized = F.normalize(
+        clip_features,
+        dim=1,
+    )
+
+    mean_scores = []
+    stimulus_scores = {}
+
+    for subject in subjects:
+        feature = features[subject]
+
+        if feature.shape != clip_features.shape:
+            raise ValueError(
+                f"Shape mismatch: "
+                f"{subject}={tuple(feature.shape)}, "
+                f"CLIP={tuple(clip_features.shape)}"
+            )
+
+        feature_normalized = F.normalize(
+            feature,
+            dim=1,
+        )
+
+        # 同じ行 = 同じ刺激を直接比較
+        #
+        # [200, 1024] * [200, 1024]
+        #          ↓ sum(dim=1)
+        #        [200]
+        matched_cosine = (
+            feature_normalized
+            * clip_normalized
+        ).sum(dim=1)
+
+        stimulus_scores[subject] = (
+            matched_cosine
+        )
+
+        mean_scores.append(
+            matched_cosine.mean()
+        )
+
+    mean_scores = torch.stack(
+        mean_scores
+    )
+
+    return mean_scores, stimulus_scores
+
+
+def compute_subject_matched_vs_unmatched_cosine(
+    features,
+    clip_features,
+    subjects,
+):
+    """
+    予測特徴と正解CLIP特徴の全200×200 cosineを計算し、
+    matched（同一刺激）とunmatched（異なる刺激）を比較する。
+    """
+
+    clip_normalized = F.normalize(
+        clip_features,
+        dim=1,
+    )
+
+    results = {}
+
+    for subject in subjects:
+        feature_normalized = F.normalize(
+            features[subject],
+            dim=1,
+        )
+
+        # [200, 1024] @ [1024, 200]
+        # -> [200, 200]
+        similarity = (
+            feature_normalized
+            @ clip_normalized.T
+        )
+
+        # 対角成分 = 同一刺激
+        matched = similarity.diag()
+
+        # 対角以外 = 異なる刺激
+        n = similarity.shape[0]
+
+        mask = ~torch.eye(
+            n,
+            dtype=torch.bool,
+            device=similarity.device,
+        )
+
+        unmatched = similarity[mask]
+
+        # 各予測刺激について、
+        # 正解刺激が200候補中何位か
+        targets = torch.arange(n)
+
+        top1 = (
+            similarity.argmax(dim=1)
+            == targets
+        ).float().mean()
+
+        results[subject] = {
+            "matched_mean": matched.mean(),
+            "unmatched_mean": unmatched.mean(),
+            "margin": (
+                matched.mean()
+                - unmatched.mean()
+            ),
+            "top1": top1,
+        }
+
+    return results
+
+
+def compute_mean_centered_subject_cosine_matrix(
+    features,
+    subjects,
+):
+    """
+    各被験者の200刺激平均を引いた後、
+    同じ刺激について被験者間cosineを計算する。
+    """
+
+    centered_features = {}
+
+    for subject in subjects:
+        feature = features[subject]
+
+        # [200, 1024] -> [1, 1024]
+        mean_feature = feature.mean(
+            dim=0,
+            keepdim=True,
+        )
+
+        # [200, 1024]
+        centered = (
+            feature
+            - mean_feature
+        )
+
+        centered_features[subject] = (
+            centered
+        )
+
+    return compute_subject_cosine_matrix(
+        centered_features,
+        subjects,
+    )
 
 def plot_clip_rdm_heatmap(
     clip_rdm,
