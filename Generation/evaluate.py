@@ -628,10 +628,6 @@ def main():
         # 簡易的な検索タスク実行 # 
         eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
         img_norm = F.normalize(img_features_test_all.float(), dim=1)
-        print(eeg_norm.shape)
-
-        import sys
-        sys.exit(0) # 後で削除
         
         similarity = eeg_norm @ img_norm.T
 
@@ -658,8 +654,6 @@ def main():
         torch.cuda.empty_cache()
 
         gen_dir = None
-        import sys 
-        sys.exit(0) # 後で削除
         if args.encoder_only:
             # Dedicated path: do not create or load a Diffusion Prior.
             print("Loading IP-Adapter + SDXL-Turbo...")
