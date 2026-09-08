@@ -75,6 +75,67 @@ def _make_subject_ids(
         device=device,
     )
 
+def _compute_rsa_loss(eeg_features, img_features, eps=1e-8):
+    """
+    Compute RSA loss between EEG-predicted features and image CLIP features.
+
+    eeg_features: [B, 1024]
+    img_features: [B, 1024]
+
+    return:
+        scalar RSA loss = 1 - Pearson correlation
+    """
+
+    batch_size = eeg_features.size(0)
+
+    # Pearson相関を取るには複数の刺激間ペアが必要
+    if batch_size < 3:
+        return eeg_features.sum() * 0.0
+
+    # ① 各特徴ベクトルをL2 normalize
+    eeg_n = F.normalize(eeg_features, dim=-1)
+    img_n = F.normalize(img_features, dim=-1)
+
+    # ② cosine distance RDMを作る
+    # shape: [B, B]
+    eeg_rdm = 1.0 - eeg_n @ eeg_n.T
+    img_rdm = 1.0 - img_n @ img_n.T
+
+    # ③ RDMの上三角（対角成分を除く）のindexを取得
+    tri = torch.triu_indices(
+        eeg_rdm.shape[0],
+        eeg_rdm.shape[0],
+        offset=1,
+        device=eeg_features.device,
+    )
+
+    # ④ B×BのRDMから刺激ペア部分だけ1次元に取り出す
+    eeg_vec = eeg_rdm[tri[0], tri[1]]
+    img_vec = img_rdm[tri[0], tri[1]]
+
+    # ⑤ Pearson相関用に平均を引く
+    eeg_centered = eeg_vec - eeg_vec.mean()
+    img_centered = img_vec - img_vec.mean() 
+
+    # ⑥ Pearson相関の分子
+    numerator = torch.sum(
+        eeg_centered * img_centered
+    )
+
+    # ⑦ Pearson相関の分母
+    denominator = (
+        torch.sqrt(torch.sum(eeg_centered ** 2) + eps)
+        *
+        torch.sqrt(torch.sum(img_centered ** 2) + eps)
+    )
+
+    # ⑧ RSA
+    rsa = numerator / denominator
+
+    # RSAを最大化したいので、lossとしては1-RSA
+    rsa_loss = 1.0 - rsa
+
+    return rsa_loss
 
 def _compute_loss(eeg_features, img_features, logit_scale, loss_func,
                   loss_mode: str, alpha: float,
