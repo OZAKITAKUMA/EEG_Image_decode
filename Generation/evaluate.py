@@ -468,6 +468,7 @@ def main():
                         help=("Feature space used by the trained encoder and prior"),)
     parser.add_argument("--adapter_path", type=str, default=None,)
     parser.add_argument("--use_adapter", action="store_true",)
+    parser.add_argument("--feature_save", action="store_true",)
     args = parser.parse_args()
 
     if args.use_adapter:
@@ -596,11 +597,42 @@ def main():
         # Prior側はAdapterを通さず、CLS 1280次元のまま
         eeg_features_test = eeg_features_native
         img_features_test_all = img_features_native
- 
+        
+        if args.feature_save:
+            # 被験者ごとのnormalize前テストEEG特徴を保存
+            test_feature_dir = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "outputs",
+                "benchmark_encoder_only",
+                "clip",
+                "test_feature",
+            )
+            print(f"testサンプルのencoder出力を{test_feature_dir}に保存")
+            os.makedirs(test_feature_dir, exist_ok=True)
+
+            test_feature_path = os.path.join(
+                test_feature_dir,
+                f"{sub.replace('-', '')}.pth",
+            )
+
+            torch.save(
+                eeg_features_test.detach().cpu(),
+                test_feature_path,
+            )
+
+            print(
+                f"Saved test feature: {test_feature_path} "
+                f"shape={tuple(eeg_features_test.shape)}"
+            )
+        
         # 簡易的な検索タスク実行 # 
         eeg_norm = F.normalize(eeg_features_test.float(), dim=1)
         img_norm = F.normalize(img_features_test_all.float(), dim=1)
+        print(eeg_norm.shape)
 
+        import sys
+        sys.exit(0) # 後で削除
+        
         similarity = eeg_norm @ img_norm.T
 
         pred_top1 = similarity.argmax(dim=1)
@@ -626,6 +658,8 @@ def main():
         torch.cuda.empty_cache()
 
         gen_dir = None
+        import sys 
+        sys.exit(0) # 後で削除
         if args.encoder_only:
             # Dedicated path: do not create or load a Diffusion Prior.
             print("Loading IP-Adapter + SDXL-Turbo...")

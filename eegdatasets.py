@@ -39,6 +39,7 @@ from torch.utils.data import Dataset
 import numpy as np
 from torch.nn import functional as F
 from PIL import Image
+from tqdm import tqdm
 
 # ── Shared feature cache directory ────────────────────────────────────────────
 # Both Generation and Retrieval scripts read/write CLIP features here so that
