@@ -308,6 +308,8 @@ def main():
     parser.add_argument('--encoder_only_ratio', type=float, default=0.25)
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr_encoder', type=float, default=3e-4)
+    parser.add_argument('--rsa_weight', type=float, default=0.0, help='Weight for RSA loss. 0.0 disables RSA loss.',)
+    parser.add_argument('--rsa_loss_type', type=str, default='pearson', choices=['pearson', 'rdm_mse'], help='RSA loss type: pearson or rdm_mse.',)
     parser.add_argument('--lr_prior', type=float, default=1e-3)
     parser.add_argument('--prior_epochs_per_step', type=int, default=1)
     parser.add_argument('--prior_batch_size', type=int, default=1024)
@@ -498,6 +500,8 @@ def main():
     print(f"  Encoder finetuning:{finetune}")
     print(f"  Feature space:     {args.feature_space}")
     print(f"  Feature dim:       {feature_dim}")
+    print(f"  RSA loss weight:   {args.rsa_weight}")
+    print(f"  RSA loss type:     {args.rsa_loss_type}")
     print(f"  Target subject:    {sub}")
     print(f"  Train subjects:    {', '.join(train_subjects)}")
     print(f"  Excluded subject:  {args.exclude_subject}")
@@ -570,6 +574,7 @@ def main():
     # ── Training loop ────────────────────────────────────────────────────
     results = []
     best_val_loss = float('inf')
+    best_val_rsa = -float('inf')
     best_val_acc = 0.0
     best_encoder_epoch = 0
     best_prior_val_loss = float("inf")
@@ -681,15 +686,28 @@ def main():
         phase_str = ("Joint" if finetune else "Prior-only") if is_prior_phase else "Encoder-only"
 
         # 1. Train encoder (Phase 1, or Phase 2 with finetuning)
-        train_loss, train_acc = None, None
+        train_loss, train_acc, train_components = None, None, None
         if not is_prior_phase or finetune:
-            train_loss, train_acc = train_encoder_epoch(
+            train_loss, train_acc, train_components = train_encoder_epoch(
                 sub, eeg_model, train_loader, encoder_optimizer, device,
                 img_features_per_class,
                 loss_mode='generation', alpha=0.90,
+                rsa_weight=args.rsa_weight,
+                rsa_loss_type=args.rsa_loss_type,
                 use_subject_id=not args.no_subject_id,
             )
 
+        if train_components is not None:
+            print(
+                "[Train loss components] "
+                f"raw: MSE={train_components['mse']:.6f}, "
+                f"Contrastive={train_components['clip']:.6f}, "
+                f"RSA={train_components['rsa']:.6f} | "
+                f"weighted: MSE={train_components['mse_term']:.6f}, "
+                f"Contrastive={train_components['clip_term']:.6f}, "
+                f"RSA={train_components['rsa_term']:.6f}"
+            )
+        
         # 2. Phase 2: extract features & train prior
         # diffusionのtrainとvalidationを行う
         prior_loss = None
@@ -734,20 +752,46 @@ def main():
             prior_val_loss = validate_prior_one_epoch(pipe, prior_val_loader, seed=args.seed,)
 
         # 3. Evaluate on VALIDATION set (never test set)
-        val_loss, val_acc = evaluate_val(
+        val_loss, val_acc, val_components, val_rsa = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
             k=200, loss_mode='generation', alpha=0.99,
-            use_subject_id=not args.no_subject_id,)
+            rsa_weight=args.rsa_weight,
+            rsa_loss_type=args.rsa_loss_type,
+            use_subject_id=not args.no_subject_id,
+        )
 
+        if val_components is not None:
+            print(
+                "[Val loss components] "
+                f"raw: MSE={val_components['mse']:.6f}, "
+                f"Contrastive={val_components['clip']:.6f}, "
+                f"RSA={val_components['rsa']:.6f} | "
+                f"weighted: MSE={val_components['mse_term']:.6f}, "
+                f"Contrastive={val_components['clip_term']:.6f}, "
+                f"RSA={val_components['rsa_term']:.6f}"
+            )
+
+        if val_rsa is not None:
+            print(f"[Validation full RSA] RSA={val_rsa:.6f}")
+        
         # 4. Logging
         epoch_results = {
             "epoch": epoch + 1, "phase": phase_str,
             "train_loss": f"{train_loss:.4f}" if train_loss is not None else "N/A",
             "train_acc": f"{train_acc:.4f}" if train_acc is not None else "N/A",
-            "val_loss": f"{val_loss:.4f}", "val_acc": f"{val_acc:.4f}",
+            "val_loss": f"{val_loss:.4f}",
+            "val_acc": f"{val_acc:.4f}",
+            "val_rsa": f"{val_rsa:.6f}" if val_rsa is not None else "N/A",
             "prior_loss": f"{prior_loss:.4f}" if prior_loss is not None else "N/A",
             "prior_val_loss": f"{prior_val_loss:.4f}" if prior_val_loss is not None else "N/A",
         }
+        if train_components is not None:
+            for name, value in train_components.items():
+                epoch_results[f"train_{name}"] = f"{value:.6f}"
+
+        if val_components is not None:
+            for name, value in val_components.items():
+                epoch_results[f"val_{name}"] = f"{value:.6f}"
         results.append(epoch_results)
 
         if not is_prior_phase:
@@ -768,17 +812,28 @@ def main():
 
         # 5. Model selection & early stopping
         if not is_prior_phase:
-            # Phase 1: select best encoder by val_loss
-            if val_loss < best_val_loss:
+            # Phase 1: select best encoder by validation RSA
+            if val_rsa is not None and val_rsa > best_val_rsa:
+                best_val_rsa = val_rsa
                 best_val_loss = val_loss
                 best_val_acc = val_acc
                 best_encoder_epoch = epoch + 1
                 patience_counter = 0
-                torch.save(eeg_model.state_dict(),
-                           os.path.join(encoder_save_dir, 'best.pth'))
-                print(f"  ★ New best encoder: val_loss={best_val_loss:.4f} acc={best_val_acc:.4f}")
+
+                torch.save(
+                    eeg_model.state_dict(),
+                    os.path.join(encoder_save_dir, 'best.pth'),
+                )
+
+                print(
+                    f"  ★ New best encoder: "
+                    f"val_rsa={best_val_rsa:.6f} "
+                    f"val_loss={best_val_loss:.4f} "
+                    f"acc={best_val_acc:.4f}"
+                )
             else:
                 patience_counter += 1
+                
         elif finetune:
             # Phase 2 joint: select by val_loss, save both models
             if val_loss < best_val_loss:
