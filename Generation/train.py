@@ -791,7 +791,8 @@ def main():
 
         if val_components is not None:
             for name, value in val_components.items():
-                epoch_results[f"val_{name}"] = f"{value:.6f}"
+                key = "val_rsa_loss" if name == "rsa" else f"val_{name}"
+                epoch_results[key] = f"{value:.6f}"
         results.append(epoch_results)
 
         if not is_prior_phase:
