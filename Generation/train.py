@@ -35,6 +35,7 @@ from eegdatasets import EEGDataset
 from diffusion_prior import DiffusionPriorUNet, EmbeddingDataset, Pipe
 from models.atms import ATMS, extract_id_from_string
 from models.eeg_clip_adapter import EEGCLIPAdapter
+from category_batch_sampler import CategoryAwareBatchSampler
 
 # Shared encoder training utilities (generation loss mode: MSE + CLIP)
 from encoder_utils import (
@@ -311,6 +312,17 @@ def main():
     parser.add_argument('--lr_encoder', type=float, default=3e-4)
     parser.add_argument('--rsa_weight', type=float, default=0.0, help='Weight for RSA loss. 0.0 disables RSA loss.',)
     parser.add_argument('--rsa_loss_type', type=str, default='pearson', choices=['pearson', 'rdm_mse'], help='RSA loss type: pearson or rdm_mse.',)
+    parser.add_argument(
+        '--category_balanced_batch',
+        action='store_true',
+        help='Use THINGSplus category-aware mini-batches for encoder training.',
+    )
+    parser.add_argument(
+        '--category_tsv',
+        type=str,
+        default='category53_long-format.tsv',
+        help='Path to THINGSplus category53_long-format.tsv.',
+    )
     parser.add_argument('--lr_prior', type=float, default=1e-3)
     parser.add_argument('--prior_epochs_per_step', type=int, default=1)
     parser.add_argument('--prior_batch_size', type=int, default=1024)
@@ -469,8 +481,28 @@ def main():
     train_subset = Subset(full_train_dataset, train_indices)
     val_subset = Subset(full_train_dataset, val_indices)
 
-    train_loader = DataLoader(train_subset, batch_size=args.batch_size,
-                              shuffle=True, num_workers=0, drop_last=True)
+    if args.category_balanced_batch:
+        category_batch_sampler = CategoryAwareBatchSampler(
+            train_subset,
+            category_tsv=args.category_tsv,
+            batch_size=args.batch_size,
+            categories_per_batch=4,
+            samples_per_category=12,
+            seed=args.seed,
+        )
+        train_loader = DataLoader(
+            train_subset,
+            batch_sampler=category_batch_sampler,
+            num_workers=0,
+        )
+    else:
+        train_loader = DataLoader(
+            train_subset,
+            batch_size=args.batch_size,
+            shuffle=True,
+            num_workers=0,
+            drop_last=True,
+        )
     train_loader_ordered = DataLoader(train_subset, batch_size=args.batch_size,
                                       shuffle=False, num_workers=0)
     # Full dataset loader for prior training (uses all 66160 samples, not just 90%)
@@ -503,6 +535,10 @@ def main():
     print(f"  Feature dim:       {feature_dim}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
+    print(
+        "  Category batch:    "
+        + ("enabled" if args.category_balanced_batch else "disabled")
+    )
     print(f"  Target subject:    {sub}")
     print(f"  Train subjects:    {', '.join(train_subjects)}")
     print(f"  Excluded subject:  {args.exclude_subject}")
