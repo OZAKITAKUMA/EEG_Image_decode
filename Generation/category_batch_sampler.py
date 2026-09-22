@@ -23,14 +23,16 @@ class CategoryAwareBatchSampler(Sampler):
         -----------------
         64 samples
 
+    A-D are distinct categories within each category-aware batch.
+
     THINGSplus categories are multi-label. At the beginning of each epoch,
     each categorized class is assigned to exactly one of its available
     categories using a deterministic RNG (seed + epoch). This prevents the
     same sample from appearing in multiple category pools.
 
-    If there are not enough category blocks to construct every batch in an
-    epoch, the remaining samples are shuffled and emitted as ordinary random
-    batches. Thus all possible full batches are retained without oversampling.
+    Samples that cannot be placed in a complete category-aware batch are not
+    discarded. They are shuffled and emitted as ordinary random batches.
+    Thus all possible full batches are retained without oversampling.
     """
 
     def __init__(
@@ -101,7 +103,6 @@ class CategoryAwareBatchSampler(Sampler):
                 )
 
         class_to_categories = {}
-
         prefix = "This picture is "
 
         for class_id, text in enumerate(class_texts):
@@ -117,7 +118,7 @@ class CategoryAwareBatchSampler(Sampler):
         return class_to_categories
 
     def __len__(self):
-        # Same behavior as the previous DataLoader(..., drop_last=True).
+        # Same number of full batches as DataLoader(..., drop_last=True).
         return len(self.subset) // self.batch_size
 
     def __iter__(self):
@@ -129,8 +130,8 @@ class CategoryAwareBatchSampler(Sampler):
         category_pools = defaultdict(list)
         filler_pool = []
 
-        # Assign each class to one category for this epoch.
-        # Samples from uncategorized classes go directly to the filler pool.
+        # Assign each class to exactly one category for this epoch.
+        # Uncategorized classes go directly to the filler pool.
         for class_id, positions in self.positions_by_class.items():
             positions = list(positions)
             rng.shuffle(positions)
@@ -143,9 +144,9 @@ class CategoryAwareBatchSampler(Sampler):
             else:
                 filler_pool.extend(positions)
 
-        # Split each category pool into same-category blocks.
-        # Remainders are not discarded; they become filler samples.
-        category_blocks = []
+        # Split each category into fixed-size same-category blocks.
+        # Remainders are preserved as filler.
+        blocks_by_category = defaultdict(list)
 
         for category, pool in category_pools.items():
             rng.shuffle(pool)
@@ -155,75 +156,82 @@ class CategoryAwareBatchSampler(Sampler):
             for block_index in range(num_blocks):
                 start = block_index * self.samples_per_category
                 end = start + self.samples_per_category
-
-                category_blocks.append(
-                    (category, pool[start:end])
-                )
+                blocks_by_category[category].append(pool[start:end])
 
             remainder_start = num_blocks * self.samples_per_category
             filler_pool.extend(pool[remainder_start:])
 
-        rng.shuffle(category_blocks)
+        for blocks in blocks_by_category.values():
+            rng.shuffle(blocks)
+
         rng.shuffle(filler_pool)
 
         total_batches = len(self)
-        block_need = self.categories_per_batch
-        filler_need = self.filler_per_batch
+        category_aware_batches = []
+        filler_cursor = 0
 
-        if filler_need == 0:
-            max_by_filler = total_batches
-        else:
-            max_by_filler = len(filler_pool) // filler_need
+        # Build batches from distinct categories while possible.
+        while len(category_aware_batches) < total_batches:
+            active_categories = [
+                category
+                for category, blocks in blocks_by_category.items()
+                if blocks
+            ]
 
-        category_aware_batches = min(
-            len(category_blocks) // block_need,
-            max_by_filler,
-            total_batches,
-        )
+            if len(active_categories) < self.categories_per_batch:
+                break
+
+            if (
+                self.filler_per_batch > 0
+                and filler_cursor + self.filler_per_batch > len(filler_pool)
+            ):
+                break
+
+            chosen_categories = rng.sample(
+                active_categories,
+                self.categories_per_batch,
+            )
+
+            batch = []
+
+            for category in chosen_categories:
+                batch.extend(blocks_by_category[category].pop())
+
+            if self.filler_per_batch > 0:
+                batch.extend(
+                    filler_pool[
+                        filler_cursor:
+                        filler_cursor + self.filler_per_batch
+                    ]
+                )
+                filler_cursor += self.filler_per_batch
+
+            rng.shuffle(batch)
+            category_aware_batches.append(batch)
 
         print(
             "[CategoryBatchSampler] "
             f"epoch={epoch + 1} "
             f"category-aware batches="
-            f"{category_aware_batches}/{total_batches} "
+            f"{len(category_aware_batches)}/{total_batches} "
             f"categorized classes="
             f"{self.num_categorized_classes}/"
             f"{len(self.positions_by_class)}"
         )
 
-        block_cursor = 0
-        filler_cursor = 0
-
-        # Category-aware batches.
-        for _ in range(category_aware_batches):
-            batch = []
-
-            for _ in range(block_need):
-                _, block = category_blocks[block_cursor]
-                block_cursor += 1
-                batch.extend(block)
-
-            if filler_need > 0:
-                batch.extend(
-                    filler_pool[
-                        filler_cursor:
-                        filler_cursor + filler_need
-                    ]
-                )
-                filler_cursor += filler_need
-
-            rng.shuffle(batch)
+        for batch in category_aware_batches:
             yield batch
 
-        # Any samples that were not used above are preserved here.
+        # Preserve all unused samples and use them in ordinary random batches.
         remaining = list(filler_pool[filler_cursor:])
 
-        for _, block in category_blocks[block_cursor:]:
-            remaining.extend(block)
+        for blocks in blocks_by_category.values():
+            for block in blocks:
+                remaining.extend(block)
 
         rng.shuffle(remaining)
 
-        remaining_batches = total_batches - category_aware_batches
+        remaining_batches = total_batches - len(category_aware_batches)
 
         for batch_index in range(remaining_batches):
             start = batch_index * self.batch_size
