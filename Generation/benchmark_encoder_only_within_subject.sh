@@ -46,6 +46,8 @@ RSA_LOSS_TYPE="${RSA_LOSS_TYPE:-pearson}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
+CATEGORY_BALANCED_BATCH="${CATEGORY_BALANCED_BATCH:-false}"
+CATEGORY_TSV="${CATEGORY_TSV:-category53_long-format.tsv}"
 
 # CLIP projected feature space (1024-D) is the default baseline.
 FEATURE_SPACE="${FEATURE_SPACE:-clip}"
@@ -85,6 +87,7 @@ echo "  Feature space:   ${FEATURE_SPACE}"
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  RSA weight:      ${RSA_WEIGHT}"
 echo "  RSA loss type:   ${RSA_LOSS_TYPE}"
+echo "  Category batch:  ${CATEGORY_BALANCED_BATCH}"
 echo "  Adapter:         false"
 echo "  Diffusion Prior: disabled"
 echo "  Seed:            ${SEED}"
@@ -151,6 +154,11 @@ for SUBJECT in ${SUBJECTS}; do
 
         if [ "${AVG_SIGNAL_TRAINING}" = true ]; then
             TRAIN_CMD+=(--avg_trials)
+        fi
+
+        if [ "${CATEGORY_BALANCED_BATCH}" = true ]; then
+            TRAIN_CMD+=(--category_balanced_batch)
+            TRAIN_CMD+=(--category_tsv "${CATEGORY_TSV}")
         fi
 
         echo "  [STEP 1] Encoder-only training ..."
