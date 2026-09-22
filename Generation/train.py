@@ -41,6 +41,7 @@ from encoder_utils import (
     train_encoder_epoch,
     evaluate_encoder as evaluate_val,
     stratified_condition_split,
+    analyze_topk_neighbors,
 )
 
 
@@ -901,6 +902,119 @@ def main():
     if not os.path.exists(best_encoder_path):
         torch.save(eeg_model.state_dict(), best_encoder_path)
 
+    eeg_model.load_state_dict(
+    torch.load(best_encoder_path, map_location=device)
+    )
+    eeg_model.eval()
+
+    print(
+        f"[INFO] Loaded best encoder for validation Top-{5} analysis "
+        f"from epoch {best_encoder_epoch}"
+    )
+
+    topk_results = analyze_topk_neighbors(
+        sub=sub,
+        model=eeg_model,
+        loader=val_loader,
+        device=device,
+        img_features_all=img_features_per_class,
+        topk=5,
+        use_subject_id=not args.no_subject_id,
+    )
+
+    
+    topk_csv_path = os.path.join(
+        results_dir,
+        "validation_top5_neighbors.csv",
+    )
+
+    with open(topk_csv_path, "w", newline="") as f:
+        fieldnames = [
+            "sample",
+            "gt_class",
+            "gt_class_name",
+            "gt_rank",
+            "gt_similarity",
+        ]
+
+        for rank in range(1, 6):
+            fieldnames.extend([
+                f"top{rank}_class",
+                f"top{rank}_class_name",
+                f"top{rank}_similarity",
+            ])
+
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for i, result in enumerate(topk_results):
+            row = {
+                "sample": i,
+                "gt_class": result["gt_class"],
+                "gt_class_name": result["gt_class_name"],
+                "gt_rank": result["gt_rank"],
+                "gt_similarity": f"{result['gt_similarity']:.4f}",
+            }
+
+            for rank, (class_idx, class_name, similarity) in enumerate(
+                zip(
+                    result["topk_classes"],
+                    result["topk_class_names"],
+                    result["topk_similarities"],
+                ),
+                start=1,
+            ):
+                row[f"top{rank}_class"] = class_idx
+                row[f"top{rank}_class_name"] = class_name
+                row[f"top{rank}_similarity"] = f"{similarity:.4f}"
+
+            writer.writerow(row)
+
+    num_samples = len(topk_results)
+
+    top1_correct = sum(
+        result["topk_classes"][0] == result["gt_class"]
+        for result in topk_results
+    )
+
+    top5_correct = sum(
+        result["gt_class"] in result["topk_classes"]
+        for result in topk_results
+    )
+
+    gt_ranks = np.array([
+        result["gt_rank"]
+        for result in topk_results
+    ])
+
+    gt_similarities = np.array([
+        result["gt_similarity"]
+        for result in topk_results
+    ])
+
+    topk_summary = {
+        "num_samples": num_samples,
+        "top1_accuracy": top1_correct / num_samples,
+        "top5_accuracy": top5_correct / num_samples,
+        "mean_gt_rank": gt_ranks.mean(),
+        "median_gt_rank": np.median(gt_ranks),
+        "mean_gt_similarity": gt_similarities.mean(),
+    }
+
+    summary_csv_path = os.path.join(
+        results_dir,
+        "validation_top5_summary.csv",
+    )
+
+    with open(summary_csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(
+            f,
+            fieldnames=topk_summary.keys(),
+        )
+        writer.writeheader()
+        writer.writerow(topk_summary) 
+    
+
     print(f"\n{'='*55}")
     print(f"Training finished at epoch {epoch+1}")
     print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
@@ -919,7 +1033,7 @@ def main():
         writer = csv.DictWriter(
         f,
         fieldnames=results[0].keys(),
-        delimiter="\t",
+        delimiter=",",
     )
         writer.writeheader()
         writer.writerows(results)

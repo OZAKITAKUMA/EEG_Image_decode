@@ -519,3 +519,97 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
         avg_components,
         val_rsa,
     )
+
+def analyze_topk_neighbors(
+    sub,
+    model,
+    loader,
+    device,
+    img_features_all,
+    *,
+    topk: int = 5,
+    use_subject_id: bool = True,
+):
+    """
+    For each validation sample, find the nearest image features
+    in the full image feature bank using cosine similarity.
+    """
+    model.eval()
+
+    img_pool = img_features_all.to(device).float()
+    img_pool = F.normalize(img_pool, dim=-1)
+
+    results = []
+    class_names = {}
+    
+    with torch.no_grad():
+        for eeg_data, labels, text, text_feats, img, img_feats in loader:
+            eeg_data = eeg_data.to(device)
+            labels = labels.to(device)
+
+            for label, class_text in zip(labels.cpu().tolist(), text):
+                class_name = class_text.removeprefix("This picture is ").strip()
+                class_names[label] = class_name
+
+            batch_size = eeg_data.size(0)
+
+            batch_size = eeg_data.size(0)
+
+            subject_ids = _make_subject_ids(
+                sub=sub,
+                model=model,
+                batch_size=batch_size,
+                device=device,
+                use_subject_id=use_subject_id,
+            )
+
+            eeg_features = model(eeg_data, subject_ids).float()
+            eeg_features = F.normalize(eeg_features, dim=-1)
+
+            similarities = eeg_features @ img_pool.T
+
+            k = min(topk, img_pool.size(0))
+            topk_similarities, topk_indices = torch.topk(
+                similarities,
+                k=k,
+                dim=1,
+            )
+
+            sorted_indices = torch.argsort(
+                similarities,
+                dim=1,
+                descending=True,
+            )
+
+            for i in range(batch_size):
+                gt_label = labels[i].item()
+
+                gt_rank = (
+                    (sorted_indices[i] == gt_label)
+                    .nonzero(as_tuple=True)[0]
+                    .item()
+                    + 1
+                )
+
+                gt_similarity = similarities[i, gt_label].item()
+
+                results.append({
+                    "gt_class": gt_label,
+                    "gt_rank": gt_rank,
+                    "gt_similarity": gt_similarity,
+                    "topk_classes": topk_indices[i].cpu().tolist(),
+                    "topk_similarities": topk_similarities[i].cpu().tolist(),
+                })
+
+    for result in results:
+        result["gt_class_name"] = class_names.get(
+            result["gt_class"],
+            str(result["gt_class"]),
+        )
+
+        result["topk_class_names"] = [
+            class_names.get(class_idx, str(class_idx))
+            for class_idx in result["topk_classes"]
+        ]
+
+    return results

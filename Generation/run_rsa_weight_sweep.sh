@@ -16,7 +16,7 @@ export SEED=42
 
 # すでに 0.1～0.5 は実験済み
 RSA_WEIGHTS=(
-    0
+    0.0
 )
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
