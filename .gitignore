@@ -79,6 +79,8 @@ Generation/generated_imgs/
 Generation/generated_imgs_tensor/
 Generation/generation_metric_outputs/
 Generation/tab_generation_metric_outputs/
+Generation/category_flow_analysis/
+Generation/clip_category_structure/
 Generation/wandb/
 Generation/LAVIS/
 Generation/diffusers/
