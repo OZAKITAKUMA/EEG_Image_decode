@@ -287,6 +287,16 @@ def main():
                         help='Directory for CLIP feature cache. '
                              'Defaults to EEG_Image_decode/features/ (shared with Retrieval). '
                              'Set explicitly only when you want a different cache location.')
+    parser.add_argument(
+        '--features_path',
+        type=str,
+        default=None,
+        help=(
+            'Explicit feature-cache file used for training/validation. '
+            'For the SVD teacher experiment, pass a reconstructed cache such as '
+            '../features/ViT-H-14_features_train_svd960.pt.'
+        ),
+    )
     parser.add_argument('--subject', type=str, default='sub-08')
     parser.add_argument(
         '--train_subjects',
@@ -408,6 +418,7 @@ def main():
                                     img_dir_training=args.img_dir_training,
                                     img_dir_test=args.img_dir_test,
                                     features_dir=args.features_dir,
+                                    features_path=args.features_path,
                                     subjects=train_subjects,
                                     exclude_subject=args.exclude_subject,
                                     train=True,
@@ -500,6 +511,24 @@ def main():
 
     print(f"  Encoder finetuning:{finetune}")
     print(f"  Feature space:     {args.feature_space}")
+    print(
+        "  Feature cache:     "
+        + (
+            os.path.abspath(args.features_path)
+            if args.features_path is not None
+            else "default"
+        )
+    )
+    if full_train_dataset.feature_metadata is not None:
+        print(
+            "  Feature transform: "
+            f"{full_train_dataset.feature_metadata.get('transform', 'unknown')}"
+        )
+        if "rank" in full_train_dataset.feature_metadata:
+            print(
+                "  SVD rank:          "
+                f"{full_train_dataset.feature_metadata['rank']}"
+            )
     print(f"  Feature dim:       {feature_dim}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
