@@ -29,6 +29,7 @@ IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
 SDXL_MODEL_PATH="${SDXL_MODEL_PATH:-stabilityai/sdxl-turbo}"
 IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
 FEATURES_DIR="${FEATURES_DIR:-}"
+TRAIN_FEATURES_PATH="${TRAIN_FEATURES_PATH:-}"
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
 #==============================================================================
@@ -82,6 +83,11 @@ echo "  Subjects:        ${SUBJECTS}"
 echo "  Data path:       ${DATA_PATH}"
 echo "  Encoder epochs:  ${ENCODER_EPOCHS} (max)"
 echo "  Feature space:   ${FEATURE_SPACE}"
+if [ -n "${TRAIN_FEATURES_PATH}" ]; then
+    echo "  Train features:  ${TRAIN_FEATURES_PATH}"
+else
+    echo "  Train features:  default"
+fi
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  RSA weight:      ${RSA_WEIGHT}"
 echo "  RSA loss type:   ${RSA_LOSS_TYPE}"
@@ -147,6 +153,10 @@ for SUBJECT in ${SUBJECTS}; do
 
         if [ -n "${FEATURES_DIR}" ]; then
             TRAIN_CMD+=(--features_dir "${FEATURES_DIR}")
+        fi
+
+        if [ -n "${TRAIN_FEATURES_PATH}" ]; then
+            TRAIN_CMD+=(--features_path "${TRAIN_FEATURES_PATH}")
         fi
 
         if [ "${AVG_SIGNAL_TRAINING}" = true ]; then
