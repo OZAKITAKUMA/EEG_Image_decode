@@ -44,8 +44,11 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 RSA_WEIGHT="${RSA_WEIGHT:-0.0}"
 RSA_LOSS_TYPE="${RSA_LOSS_TYPE:-pearson}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
+TRAIN_SAMPLE_FILTER="${TRAIN_SAMPLE_FILTER:-none}"
 PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
+TRAIN_SAMPLE_FILTER="${TRAIN_SAMPLE_FILTER:-none}"
+TRAIN_SAMPLE_FILTER_COUNT="${TRAIN_SAMPLE_FILTER_COUNT:-1}"
 
 # CLIP projected feature space (1024-D) is the default baseline.
 FEATURE_SPACE="${FEATURE_SPACE:-clip}"
@@ -85,6 +88,8 @@ echo "  Feature space:   ${FEATURE_SPACE}"
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  RSA weight:      ${RSA_WEIGHT}"
 echo "  RSA loss type:   ${RSA_LOSS_TYPE}"
+echo "  Train filter:     ${TRAIN_SAMPLE_FILTER}"
+echo "  Filter count:     ${TRAIN_SAMPLE_FILTER_COUNT}"
 echo "  Adapter:         false"
 echo "  Diffusion Prior: disabled"
 echo "  Seed:            ${SEED}"
@@ -143,6 +148,9 @@ for SUBJECT in ${SUBJECTS}; do
             --val_ratio "${VAL_RATIO}"
             --patience "${PATIENCE}"
             --feature_space "${FEATURE_SPACE}"
+            --train_sample_filter "${TRAIN_SAMPLE_FILTER}"
+            --train_sample_filter "${TRAIN_SAMPLE_FILTER}"
+            --train_sample_filter_count "${TRAIN_SAMPLE_FILTER_COUNT}"
         )
 
         if [ -n "${FEATURES_DIR}" ]; then

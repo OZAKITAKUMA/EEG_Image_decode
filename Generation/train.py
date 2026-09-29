@@ -271,6 +271,114 @@ def compute_adapter_loss(predicted, target):
 
     return total_loss
 
+def find_train_conditions_by_center(
+    img_features_all,
+    train_condition_indices,
+    mode,
+    n_remove,
+):
+    """
+    各classのtrain 9条件について、
+    CLIP中心から近い / 遠い条件を選ぶ。
+
+    img_features_all:
+        (16540, 1024)
+
+    train_condition_indices:
+        (1654 * 9,)
+
+    mode:
+        "nearest" or "farthest"
+
+    n_remove:
+        各classから除外する条件数
+
+    Returns:
+        selected_condition_indices:
+            (1654 * n_remove,)
+    """
+
+    train_condition_indices = np.asarray(
+        train_condition_indices
+    ).reshape(
+        1654,
+        9,
+    )
+
+    index_tensor = torch.as_tensor(
+        train_condition_indices,
+        dtype=torch.long,
+    )
+
+    # (1654, 9, 1024)
+    train_features = img_features_all[
+        index_tensor
+    ].float()
+
+    train_features_n = nn.functional.normalize(
+        train_features,
+        dim=-1,
+    )
+
+    # 各classのtrain 9点の中心
+    # (1654, 1024)
+    centers = train_features_n.mean(
+        dim=1
+    )
+
+    centers = nn.functional.normalize(
+        centers,
+        dim=-1,
+    )
+
+    # 各点とclass中心とのcosine similarity
+    # (1654, 9)
+    similarities = (
+        train_features_n
+        * centers.unsqueeze(1)
+    ).sum(
+        dim=-1
+    )
+
+    if mode == "nearest":
+
+        # similarityが大きい順
+        selected_positions = torch.argsort(
+            similarities,
+            dim=-1,
+            descending=True,
+        )[:, :n_remove]
+
+    elif mode == "farthest":
+
+        # similarityが小さい順
+        selected_positions = torch.argsort(
+            similarities,
+            dim=-1,
+            descending=False,
+        )[:, :n_remove]
+
+    else:
+        raise ValueError(
+            "mode must be "
+            "'nearest' or 'farthest'."
+        )
+
+    class_indices = np.arange(
+        1654
+    )[:, None]
+
+    selected_condition_indices = (
+        train_condition_indices[
+            class_indices,
+            selected_positions.cpu().numpy(),
+        ]
+    )
+
+    return selected_condition_indices.reshape(
+        -1
+    )
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -320,6 +428,24 @@ def main():
     parser.add_argument('--save_interval', type=int, default=5)
     parser.add_argument('--val_ratio', type=float, default=0.1,
                         help='Fraction of training conditions held out for validation')
+    parser.add_argument("--train_sample_filter", type=str, default="none", choices=["none", "nearest", "farthest", "random",],
+        help=(
+            "Training-condition filtering per class: "
+            "'none'=use all 9 train conditions, "
+            "'farthest'=remove the condition farthest "
+            "from the train-9 CLIP center, "
+            "'random'=remove one random condition."
+        ),
+    )
+    parser.add_argument(
+        "--train_sample_filter_count",
+        type=int,
+        default=1,
+        help=(
+            "Number of training conditions "
+            "removed from each class."
+        ),
+    )
     parser.add_argument('--patience', type=int, default=20,
                         help='Early stopping patience (epochs without val improvement)')
     parser.add_argument('--encoder_finetuning', action='store_true',
@@ -434,6 +560,159 @@ def main():
                                                             trials_per_condition=tpc, val_ratio=args.val_ratio, seed=args.seed,
     )
 
+    # ============================================================
+    # Optional train-condition filtering
+    # ============================================================
+
+    if args.train_sample_filter != "none":
+
+        if not args.avg_trials:
+            raise ValueError(
+                "--train_sample_filter currently requires "
+                "--avg_trials."
+            )
+
+        if args.feature_space != "clip":
+            raise ValueError(
+                "--train_sample_filter currently requires "
+                "--feature_space clip."
+            )
+
+        if len(base_train_indices) != 1654 * 9:
+            raise RuntimeError(
+                "Train sample filtering expects "
+                "9 train conditions per class, "
+                f"but got {len(base_train_indices)} samples."
+            )
+
+        n_remove = (
+            args.train_sample_filter_count
+        )
+
+        if not 1 <= n_remove <= 8:
+            raise ValueError(
+                "--train_sample_filter_count "
+                "must be between 1 and 8."
+            )
+
+        train_condition_matrix = np.asarray(
+            base_train_indices
+        ).reshape(
+            1654,
+            9,
+        )
+
+        # --------------------------------------------------------
+        # 中心から近い / 遠いものを削除
+        # --------------------------------------------------------
+
+        if args.train_sample_filter in {
+            "nearest",
+            "farthest",
+        }:
+
+            removed_indices = (
+                find_train_conditions_by_center(
+                    img_features_all,
+                    base_train_indices,
+                    mode=args.train_sample_filter,
+                    n_remove=n_remove,
+                )
+            )
+
+        # --------------------------------------------------------
+        # ランダム削除
+        # --------------------------------------------------------
+
+        elif args.train_sample_filter == "random":
+
+            rng = np.random.RandomState(
+                args.seed
+            )
+
+            # 各classの9条件に乱数を振る
+            # (1654, 9)
+            random_scores = rng.rand(
+                1654,
+                9,
+            )
+
+            # 各classで重複なしにn_remove個選択
+            random_positions = np.argsort(
+                random_scores,
+                axis=1,
+            )[:, :n_remove]
+
+            removed_indices = (
+                train_condition_matrix[
+                    np.arange(1654)[:, None],
+                    random_positions,
+                ]
+                .reshape(-1)
+            )
+
+        else:
+            raise ValueError(
+                "Unknown train_sample_filter: "
+                f"{args.train_sample_filter}"
+            )
+
+        removed_set = set(
+            removed_indices.tolist()
+        )
+
+        base_train_indices = np.asarray(
+            [
+                index
+                for index in base_train_indices
+                if index not in removed_set
+            ],
+            dtype=int,
+        )
+
+        remaining_per_class = (
+            9 - n_remove
+        )
+
+        expected_filtered_samples = (
+            1654
+            * remaining_per_class
+        )
+
+        if (
+            len(base_train_indices)
+            != expected_filtered_samples
+        ):
+            raise RuntimeError(
+                "Unexpected filtered train size: "
+                f"expected={expected_filtered_samples}, "
+                f"actual={len(base_train_indices)}"
+            )
+
+        print(
+            "Train sample filter:",
+            args.train_sample_filter,
+        )
+
+        print(
+            "Removed per class:",
+            n_remove,
+        )
+
+        print(
+            "Removed conditions:",
+            len(removed_indices),
+        )
+
+        print(
+            "Remaining per class:",
+            remaining_per_class,
+        )
+
+        print(
+            "Remaining train conditions:",
+            len(base_train_indices),
+        )
 
     samples_per_subject = 1654 * 10 * tpc
     #　被験者数 × 一人当たりのサンプル数
@@ -501,6 +780,8 @@ def main():
     print(f"  Encoder finetuning:{finetune}")
     print(f"  Feature space:     {args.feature_space}")
     print(f"  Feature dim:       {feature_dim}")
+    print(f"  Train filter:      {args.train_sample_filter}")
+    print(f"  Filter count:      {args.train_sample_filter_count}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
     print(f"  Target subject:    {sub}")
