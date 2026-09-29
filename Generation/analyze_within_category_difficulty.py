@@ -54,6 +54,11 @@ def compute_within_category_rows(
         dim=-1,
     )
 
+    eeg_n = F.normalize(
+        eeg_features.float(),
+        dim=-1,
+    )
+
     gt_cosine, gt_rank = (
         compute_eeg_prediction_quality(
             eeg_features,
@@ -136,6 +141,16 @@ def compute_within_category_rows(
                 - similarity
             )
 
+            pred_center_similarity = torch.dot(
+                eeg_n[row_idx],
+                center,
+            ).item()
+
+            pred_center_distance = (
+                1.0
+                - pred_center_similarity
+            )
+
             rows.append({
                 "category":
                     category,
@@ -155,6 +170,15 @@ def compute_within_category_rows(
 
                 "center_distance":
                     center_distance,
+
+                "pred_center_distance":
+                    pred_center_distance,
+
+                "delta_center_distance":
+                    (
+                        pred_center_distance
+                        - center_distance
+                    ),
 
                 "gt_cosine":
                     float(
@@ -249,6 +273,19 @@ def analyze_each_category(
 
             "n":
                 n,
+
+            "mean_delta_center_distance":
+                group[
+                    "delta_center_distance"
+                ].mean(),
+
+            "shrink_ratio":
+                (
+                    group[
+                        "delta_center_distance"
+                    ]
+                    < 0
+                ).mean(),
 
             "rho_distance_gt_cosine":
                 rho_cosine,
@@ -411,6 +448,91 @@ def save_rho_histogram(
 
     plt.close()
 
+def save_center_distance_scatter(
+    long_df,
+    output_path,
+):
+    """
+    GTとEEG predictionについて、
+    同じカテゴリ中心までの距離を比較する。
+
+    x:
+        GT -> category center
+
+    y:
+        prediction -> category center
+
+    y < x:
+        predictionの方がカテゴリ中心に近い
+    """
+
+    x = long_df[
+        "center_distance"
+    ].to_numpy()
+
+    y = long_df[
+        "pred_center_distance"
+    ].to_numpy()
+
+    valid = (
+        np.isfinite(x)
+        & np.isfinite(y)
+    )
+
+    x = x[valid]
+    y = y[valid]
+
+    plt.figure(
+        figsize=(6, 6)
+    )
+
+    plt.scatter(
+        x,
+        y,
+        alpha=0.25,
+        s=10,
+    )
+
+    min_value = min(
+        x.min(),
+        y.min(),
+    )
+
+    max_value = max(
+        x.max(),
+        y.max(),
+    )
+
+    plt.plot(
+        [min_value, max_value],
+        [min_value, max_value],
+        linestyle="--",
+    )
+
+    plt.xlabel(
+        "GT distance to category center"
+    )
+
+    plt.ylabel(
+        "Prediction distance to category center"
+    )
+
+    plt.title(
+        "GT vs Prediction distance to category center"
+    )
+
+    plt.axis(
+        "equal"
+    )
+
+    plt.tight_layout()
+
+    plt.savefig(
+        output_path,
+        dpi=200,
+    )
+
+    plt.close()
 
 # ============================================================
 # Main
@@ -577,6 +699,51 @@ def main():
         index=False,
     )
 
+    valid_delta = (
+        long_df[
+            "delta_center_distance"
+        ].dropna()
+    )
+
+    n_shrunk = int(
+        (
+            valid_delta < 0
+        ).sum()
+    )
+
+    shrink_ratio = (
+        n_shrunk
+        / len(valid_delta)
+    )
+
+    print(
+        "\n"
+        "========================================"
+    )
+
+    print(
+        "CENTER SHRINKAGE RESULT"
+    )
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "Mean delta center distance:",
+        f"{valid_delta.mean():.4f}",
+    )
+
+    print(
+        "Median delta center distance:",
+        f"{valid_delta.median():.4f}",
+    )
+
+    print(
+        "Prediction closer to center:",
+        f"{n_shrunk}/{len(valid_delta)} "
+        f"({shrink_ratio * 100:.1f}%)",
+    )
     # ========================================================
     # 4. Correlation within each category
     # ========================================================
@@ -600,6 +767,72 @@ def main():
         index=False,
     )
 
+    n_negative_mean_delta = int(
+        (
+            category_df[
+                "mean_delta_center_distance"
+            ]
+            < 0
+        ).sum()
+    )
+
+    n_majority_shrunk = int(
+        (
+            category_df[
+                "shrink_ratio"
+            ]
+            > 0.5
+        ).sum()
+    )
+
+    print(
+        "\n"
+        "========================================"
+    )
+
+    print(
+        "CATEGORY-WISE CENTER SHRINKAGE"
+    )
+
+    print(
+        "========================================"
+    )
+
+    print(
+        "Categories with mean delta < 0:",
+        f"{n_negative_mean_delta}/"
+        f"{len(category_df)}",
+    )
+
+    print(
+        "Categories with shrink ratio > 0.5:",
+        f"{n_majority_shrunk}/"
+        f"{len(category_df)}",
+    )
+
+    print(
+        "\n"
+        "Category-wise shrinkage:"
+    )
+
+    print(
+        category_df[
+            [
+                "category",
+                "n",
+                "mean_delta_center_distance",
+                "shrink_ratio",
+            ]
+        ]
+        .sort_values(
+            "shrink_ratio",
+            ascending=False,
+        )
+        .to_string(
+            index=False
+        )
+    )
+    
     # ========================================================
     # 5. Summary
     # ========================================================
@@ -818,6 +1051,16 @@ def main():
             args.output_dir,
             "rho_gt_cosine_histogram.png",
         ),
+    )
+
+    center_scatter_path = os.path.join(
+        args.output_dir,
+        "gt_vs_prediction_center_distance.png",
+    )
+
+    save_center_distance_scatter(
+        long_df,
+        center_scatter_path,
     )
 
     print(
