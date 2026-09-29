@@ -188,6 +188,7 @@ class EEGDataset(Dataset):
         self.data = self._extract_time_window(self.data, time_window)
         
         self.visual_projection = None
+        self.feature_metadata = None
         
         # ── Feature loading ──────────────────────────────────────────────
         if preloaded_features is not None:
@@ -291,6 +292,7 @@ class EEGDataset(Dataset):
             self.text_features = saved["text_features"]
             self.img_features = saved["img_features"]
             self.visual_projection = saved.get("visual_projection")
+            self.feature_metadata = saved.get("feature_metadata")
 
             # 古いキャッシュにprojectionがない場合だけ追加
             if (self.feature_space == "cls" and self.visual_projection is None):
