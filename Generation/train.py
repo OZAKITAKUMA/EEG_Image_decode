@@ -321,6 +321,17 @@ def main():
     parser.add_argument('--lr_encoder', type=float, default=3e-4)
     parser.add_argument('--rsa_weight', type=float, default=0.0, help='Weight for RSA loss. 0.0 disables RSA loss.',)
     parser.add_argument('--rsa_loss_type', type=str, default='pearson', choices=['pearson', 'rdm_mse'], help='RSA loss type: pearson or rdm_mse.',)
+    parser.add_argument(
+        '--encoder_selection_metric',
+        type=str,
+        default='rsa',
+        choices=['rsa', 'val_loss'],
+        help=(
+            "Metric used to select the best encoder checkpoint. "
+            "'rsa' maximizes validation RSA; "
+            "'val_loss' minimizes validation MSE + Contrastive loss."
+        ), 
+    )
     parser.add_argument('--lr_prior', type=float, default=1e-3)
     parser.add_argument('--prior_epochs_per_step', type=int, default=1)
     parser.add_argument('--prior_batch_size', type=int, default=1024)
@@ -532,6 +543,7 @@ def main():
     print(f"  Feature dim:       {feature_dim}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
+    print(f"  Encoder selection: {args.encoder_selection_metric}")
     print(f"  Target subject:    {sub}")
     print(f"  Train subjects:    {', '.join(train_subjects)}")
     print(f"  Excluded subject:  {args.exclude_subject}")
@@ -844,8 +856,32 @@ def main():
         # 5. Model selection & early stopping
         if not is_prior_phase:
             # Phase 1: select best encoder by validation RSA
-            if val_rsa is not None and val_rsa > best_val_rsa:
-                best_val_rsa = val_rsa
+            # Phase 1: select best encoder by the requested validation metric
+            if args.encoder_selection_metric == "rsa":
+                improved = (
+                    val_rsa is not None
+                    and val_rsa > best_val_rsa
+                )
+
+            elif args.encoder_selection_metric == "val_loss":
+                improved = (
+                    val_loss < best_val_loss
+                )
+
+            else:
+                raise ValueError(
+                    "Unknown encoder_selection_metric: "
+                    f"{args.encoder_selection_metric}"
+                )
+
+
+            if improved:
+                best_val_rsa = (
+                    val_rsa
+                    if val_rsa is not None
+                    else best_val_rsa
+                )
+
                 best_val_loss = val_loss
                 best_val_acc = val_acc
                 best_encoder_epoch = epoch + 1
@@ -853,15 +889,20 @@ def main():
 
                 torch.save(
                     eeg_model.state_dict(),
-                    os.path.join(encoder_save_dir, 'best.pth'),
+                    os.path.join(
+                        encoder_save_dir,
+                        "best.pth",
+                    ),
                 )
 
                 print(
                     f"  ★ New best encoder: "
-                    f"val_rsa={best_val_rsa:.6f} "
+                    f"selection={args.encoder_selection_metric} "
+                    f"val_rsa={val_rsa if val_rsa is not None else 'N/A'} "
                     f"val_loss={best_val_loss:.4f} "
                     f"acc={best_val_acc:.4f}"
                 )
+
             else:
                 patience_counter += 1
                 
@@ -1084,6 +1125,7 @@ def main():
         f.write(f"feature_space="f"{args.feature_space}\n")
         f.write(f"feature_dim="f"{feature_dim}\n")
         f.write(f"encoder_only={str(args.encoder_only).lower()}\n")
+        f.write(f"encoder_selection_metric={args.encoder_selection_metric}\n")
     print(f"Paths info:   {info_path}")
 
 

@@ -16,7 +16,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 SUBJECTS="${SUBJECTS:-sub-01}"
-SVD_RANKS="${SVD_RANKS:-1008 992 960 896 768}"
+SVD_RANKS="${SVD_RANKS:- 1}"
 
 SOURCE_FEATURES="${SOURCE_FEATURES:-${REPO_ROOT}/features/ViT-H-14_features_train.pt}"
 SVD_FEATURES_DIR="${SVD_FEATURES_DIR:-${REPO_ROOT}/features}"
@@ -26,6 +26,7 @@ BATCH_SIZE="${BATCH_SIZE:-64}"
 LR_ENCODER="${LR_ENCODER:-3e-4}"
 RSA_WEIGHT="${RSA_WEIGHT:-0.0}"
 RSA_LOSS_TYPE="${RSA_LOSS_TYPE:-pearson}"
+ENCODER_SELECTION_METRIC="${ENCODER_SELECTION_METRIC:-rsa}"
 VAL_RATIO="${VAL_RATIO:-0.1}"
 PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
@@ -91,6 +92,7 @@ for RANK in ${SVD_RANKS}; do
     LR_ENCODER="${LR_ENCODER}" \
     RSA_WEIGHT="${RSA_WEIGHT}" \
     RSA_LOSS_TYPE="${RSA_LOSS_TYPE}" \
+    ENCODER_SELECTION_METRIC="${ENCODER_SELECTION_METRIC}" \
     VAL_RATIO="${VAL_RATIO}" \
     PATIENCE="${PATIENCE}" \
     AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING}" \
@@ -98,8 +100,8 @@ for RANK in ${SVD_RANKS}; do
     TRAIN_FEATURES_PATH="${FEATURE_FILE}" \
     GPU="${GPU}" \
     SEED="${SEED}" \
-    MODEL_SAVE_DIR="${SCRIPT_DIR}/models/benchmark_svd_teacher/clip/${EXP_NAME}" \
-    OUTPUT_DIR="${SCRIPT_DIR}/outputs/benchmark_svd_teacher/clip/${EXP_NAME}" \
+    MODEL_SAVE_DIR="${SCRIPT_DIR}/models/benchmark_svd_teacher/clip/${ENCODER_SELECTION_METRIC}/${EXP_NAME}" \
+    OUTPUT_DIR="${SCRIPT_DIR}/outputs/benchmark_svd_teacher/clip/${ENCODER_SELECTION_METRIC}/${EXP_NAME}" \
     bash "${SCRIPT_DIR}/benchmark_encoder_only_within_subject.sh"
 done
 
@@ -107,3 +109,9 @@ echo ""
 echo "============================================================"
 echo " SVD Teacher sweep finished"
 echo "============================================================"
+
+
+ENCODER_SELECTION_METRIC=val_loss \
+RSA_WEIGHT=0.0 \
+SVD_RANKS="1008 992 960 896 768 640 512 384 256 128 64 16 1" \ 
+bash run_svd_teacher_sweep.sh
