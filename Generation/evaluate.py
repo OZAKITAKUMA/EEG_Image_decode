@@ -36,7 +36,10 @@ from skimage.metrics import structural_similarity as ssim_func
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eegdatasets import EEGDataset
+from eegdatasets import (
+    EEGDataset,
+    get_image_encoder_feature_dim,
+)
 from diffusion_prior import DiffusionPriorUNet, Pipe
 from models.atms import ATMS, extract_id_from_string
 from pipeline import Generator4Embeds
@@ -429,6 +432,16 @@ def main():
     parser.add_argument('--features_dir', type=str, default=None,
                         help='Directory containing pre-extracted CLIP features. '
                              'Defaults to EEG_Image_decode/features/ (shared cache).')
+    parser.add_argument(
+        '--image_encoder',
+        type=str,
+        default='clip',
+        choices=['clip', 'dinov3', 'siglip2'],
+        help=(
+            "Image encoder used for target image features. "
+            "Default: clip."
+        ),
+    )
     parser.add_argument('--output_dir', type=str, required=True)
     parser.add_argument('--encoder_path', type=str, required=True)
     parser.add_argument('--prior_path', type=str, default=None,
@@ -497,7 +510,12 @@ def main():
             "Priorを使う評価では--prior_pathを指定してください"
         )
 
-    feature_dim = (1024 if args.feature_space == "clip" else 1280)
+    if args.image_encoder == "clip" and args.feature_space == "cls":
+        feature_dim = 1280
+    else:
+        feature_dim = get_image_encoder_feature_dim(
+            args.image_encoder
+        )
 
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -511,6 +529,7 @@ def main():
     test_dataset = EEGDataset(args.data_path,
                               img_dir_training=args.img_dir_training,
                               img_dir_test=args.img_directory_test,
+                              feature_type=args.image_encoder,
                               features_dir=args.features_dir,
                               subjects=[sub], train=False,
                               feature_space=args.feature_space,
@@ -643,7 +662,17 @@ def main():
 
         print(f"Retrieval Top-1: {top1_acc.item():.4f}")
         print(f"Retrieval Top-5: {top5_acc.item():.4f}")
-        
+
+        # Non-CLIP image features cannot be passed directly to
+        # the current CLIP/IP-Adapter generation pipeline.
+        if args.image_encoder != "clip":
+            print(
+                f"{args.image_encoder} evaluation finished after retrieval. "
+                "SDXL generation is skipped because the current generator "
+                "expects CLIP image embeddings."
+            )
+            return
+
         # 検索タスク終了 #
         if args.retrieval_only:
             print("Retrieval-only evaluation finished.")

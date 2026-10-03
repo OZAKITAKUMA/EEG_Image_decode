@@ -78,9 +78,93 @@ _FEATURE_DEFAULTS = {
     },
 }
 
+# ── Image encoder configuration ───────────────────────────────────────────────
+_IMAGE_ENCODER_CONFIGS = {
+    'clip': {
+        'backend': 'open_clip',
+        'model_name': 'ViT-H-14',
+        'pretrained': 'laion2b_s32b_b79k',
+        'feature_dim': 1024,
+        'cache_name': 'ViT-H-14',
+    },
+    'dinov3': {
+        'backend': 'transformers',
+        'model_name': 'facebook/dinov3-vitl16-pretrain-lvd1689m',
+        'feature_dim': 1024,
+        'cache_name': 'DINOv3-ViTL16',
+    },
+    'siglip2': {
+        'backend': 'transformers',
+        'model_name': 'google/siglip2-large-patch16-256',
+        'feature_dim': 1024,
+        'cache_name': 'SigLIP2-Large-Patch16-256',
+    },
+}
+
+def get_image_encoder_feature_dim(image_encoder):
+    if image_encoder not in _IMAGE_ENCODER_CONFIGS:
+        raise ValueError(
+            f"Unknown image encoder: {image_encoder!r}. "
+            f"Choose from: {list(_IMAGE_ENCODER_CONFIGS.keys())}"
+        )
+
+    return _IMAGE_ENCODER_CONFIGS[
+        image_encoder
+    ]['feature_dim']
+
 # ── Lazy OpenCLIP loader ──────────────────────────────────────────────────────
 _CLIP_MODEL_TYPE = 'ViT-H-14'
 _clip_state: dict = {}
+
+_image_encoder_state: dict = {}
+
+
+def _ensure_image_encoder_loaded(image_encoder):
+    if image_encoder == 'clip':
+        _ensure_clip_loaded()
+        return
+
+    if image_encoder in _image_encoder_state:
+        return
+
+    if image_encoder not in _IMAGE_ENCODER_CONFIGS:
+        raise ValueError(
+            f"Unknown image encoder: {image_encoder!r}. "
+            f"Choose from: {list(_IMAGE_ENCODER_CONFIGS.keys())}"
+        )
+
+    config = _IMAGE_ENCODER_CONFIGS[image_encoder]
+
+    if config['backend'] != 'transformers':
+        raise ValueError(
+            f"Unsupported backend for {image_encoder}: "
+            f"{config['backend']}"
+        )
+
+    from transformers import AutoImageProcessor, AutoModel
+
+    device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+
+    processor = AutoImageProcessor.from_pretrained(
+        config['model_name']
+    )
+
+    model = AutoModel.from_pretrained(
+        config['model_name']
+    ).to(device)
+
+    model.eval()
+
+    _image_encoder_state[image_encoder] = {
+        'model': model,
+        'processor': processor,
+        'device': device,
+    }
+
+    print(
+        f"{image_encoder} loaded: "
+        f"{config['model_name']} on {device}"
+    )
 
 
 def _ensure_clip_loaded():
@@ -196,9 +280,21 @@ class EEGDataset(Dataset):
             self.img_features = preloaded_features['img_features']
         elif self.classes is not None or self.pictures is not None:
             # Subset mode: compute features on the fly
-            _ensure_clip_loaded()
-            self.text_features = self._encode_text(self.text)
-            self.img_features = self._encode_images(self.img)
+            if self.feature_type in ('ViT-H-14', 'clip'):
+                _ensure_clip_loaded()
+                self.text_features = self._encode_text(self.text)
+                self.img_features = self._encode_images(self.img)
+
+            elif self.feature_type in ('dinov3', 'siglip2'):
+                _ensure_image_encoder_loaded(self.feature_type)
+                self.text_features = None
+                self.img_features = self._encode_transformer_images(self.img)
+
+            else:
+                raise ValueError(
+                    f"On-the-fly subset feature extraction is not supported "
+                    f"for feature_type={self.feature_type!r}"
+                )
         else:
             self._load_features()
 
@@ -210,6 +306,9 @@ class EEGDataset(Dataset):
         if ft in ('ViT-H-14', 'clip'):
             self._load_clip_features()
 
+        elif ft in ('dinov3', 'siglip2'):
+            self._load_transformer_image_features()
+        
         elif ft == 'vae_latent':
             fname = ('train_image_latent_512.pt' if self.train
                      else 'test_image_latent_512.pt')
@@ -256,6 +355,96 @@ class EEGDataset(Dataset):
                 f"Choose from: clip/ViT-H-14, vae_latent, "
                 + ', '.join(_FEATURE_DEFAULTS))
 
+    def _load_transformer_image_features(self):
+        image_encoder = self.feature_type
+        config = _IMAGE_ENCODER_CONFIGS[image_encoder]
+
+        split = "train" if self.train else "test"
+
+        fname = (
+            f"{config['cache_name']}_features_{split}.pt"
+        )
+
+        candidates = [
+            self.features_path,
+            os.path.join(self.features_dir, fname),
+            fname,
+        ]
+
+        load_from = next(
+            (
+                path
+                for path in candidates
+                if path and os.path.exists(path)
+            ),
+            None,
+        )
+
+        if load_from is not None:
+            print(
+                f"Loading pre-extracted {image_encoder} features "
+                f"from: {load_from}"
+            )
+
+            saved = torch.load(
+                load_from,
+                map_location="cpu",
+                weights_only=False,
+            )
+
+            self.img_features = saved["img_features"]
+            self.text_features = None
+
+        else:
+            print(
+                f"No cached {image_encoder} features found. "
+                f"Extracting features..."
+            )
+
+            self.img_features = (
+                self._encode_transformer_images(self.img)
+            )
+
+            self.text_features = None
+
+            cache = os.path.join(
+                self.features_dir,
+                fname,
+            )
+
+            os.makedirs(
+                self.features_dir,
+                exist_ok=True,
+            )
+
+            torch.save(
+                {
+                    "img_features": self.img_features.cpu(),
+                    "image_encoder": image_encoder,
+                    "model_name": config["model_name"],
+                    "feature_dim": config["feature_dim"],
+                },
+                cache,
+            )
+
+            print(f"Saved {image_encoder} features: {cache}")
+
+        print(
+            f"{image_encoder} image features:",
+            self.img_features.shape,
+        )
+
+        _image_encoder_state.pop(
+            image_encoder,
+            None,
+        )
+
+        import gc
+        gc.collect()
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    
     def _load_clip_features(self):
         split = "train" if self.train else "test"
         if self.feature_space == "cls":
@@ -799,6 +988,88 @@ class EEGDataset(Dataset):
         print("Preprojection features:", features.shape)
 
         return features
+
+    def _encode_transformer_images(self, image_paths):
+        image_encoder = self.feature_type
+
+        _ensure_image_encoder_loaded(image_encoder)
+
+        state = _image_encoder_state[image_encoder]
+
+        model = state['model']
+        processor = state['processor']
+        dev = state['device']
+
+        feats_list = []
+        batch_size = 1 if image_encoder == 'siglip2' else 8
+
+        for i in tqdm(
+            range(0, len(image_paths), batch_size),
+            desc=f"{image_encoder} features",
+        ):
+            batch = image_paths[i:i + batch_size]
+
+            images = [
+                Image.open(path).convert("RGB")
+                for path in batch
+            ]
+
+            inputs = processor(
+                images=images,
+                return_tensors="pt",
+            )
+
+            inputs = {
+                key: value.to(dev)
+                if torch.is_tensor(value)
+                else value
+                for key, value in inputs.items()
+            }
+
+            with torch.inference_mode():
+
+                if image_encoder == 'dinov3':
+                    outputs = model(**inputs)
+
+                    features = outputs.last_hidden_state[:, 0, :]
+
+                elif image_encoder == 'siglip2':
+                    features = model.get_image_features(**inputs)
+
+                else:
+                    raise ValueError(
+                        f"Unsupported transformer image encoder: "
+                        f"{image_encoder}"
+                    )
+
+            feats_list.append(
+                features.detach().float().cpu()
+            )
+
+        features = torch.cat(
+            feats_list,
+            dim=0,
+        )
+
+        expected_dim = _IMAGE_ENCODER_CONFIGS[
+            image_encoder
+        ]['feature_dim']
+
+        if features.shape[-1] != expected_dim:
+            raise RuntimeError(
+                f"{image_encoder} feature dimension mismatch: "
+                f"expected={expected_dim}, "
+                f"actual={features.shape[-1]}"
+            )
+
+        print(
+            f"{image_encoder} features:",
+            features.shape,
+        )
+
+        return features
+
+    
 
     # ── Dataset interface ─────────────────────────────────────────────────────
 
