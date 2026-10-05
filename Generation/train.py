@@ -21,6 +21,7 @@ import csv
 import random
 import datetime
 import argparse
+import subprocess
 
 import numpy as np
 import torch
@@ -292,6 +293,19 @@ def main():
                              'Set explicitly only when you want a different cache location.')
     parser.add_argument('--subject', type=str, default='sub-08')
     parser.add_argument(
+        '--method',
+        type=str,
+        default='baseline',
+        help='Experiment method name used for experiment organization.',
+    )
+
+    parser.add_argument(
+        '--experiment_type',
+        type=str,
+        default='manual',
+        help='Experiment type selected by the experiment launcher.',
+    )
+    parser.add_argument(
         '--image_encoder',
         type=str,
         default='clip',
@@ -325,6 +339,24 @@ def main():
     parser.add_argument('--rsa_weight', type=float, default=0.0, help='Weight for RSA loss. 0.0 disables RSA loss.',)
     parser.add_argument('--rsa_loss_type', type=str, default='pearson', choices=['pearson', 'rdm_mse'], help='RSA loss type: pearson or rdm_mse.',)
     parser.add_argument('--lr_prior', type=float, default=1e-3)
+    parser.add_argument(
+        '--checkpoint_criterion',
+        type=str,
+        default='val_rsa_pearson',
+        choices=[
+            'val_base_loss',
+            'val_total_loss',
+            'val_rsa_pearson',
+            'val_rdm_mse',
+        ],
+        help=(
+            "Criterion used to select the best EEG encoder checkpoint. "
+            "'val_base_loss': weighted MSE + Contrastive loss, "
+            "'val_total_loss': base loss + RSA loss, "
+            "'val_rsa_pearson': maximum validation RDM Pearson correlation, "
+            "'val_rdm_mse': minimum validation RDM MSE."
+        ),
+    )
     parser.add_argument('--prior_epochs_per_step', type=int, default=1)
     parser.add_argument('--prior_batch_size', type=int, default=1024)
     parser.add_argument('--prior_dropout', type=float, default=0.1)
@@ -601,6 +633,61 @@ def main():
     if args.train_adapter:
         os.makedirs(adapter_save_dir, exist_ok=True)
 
+    # ── Save experiment configuration ───────────────────────────────────────
+    experiment_config_path = os.path.join(
+        results_dir,
+        "experiment_config.txt",
+    )
+
+    with open(experiment_config_path, "w") as f:
+        f.write("===== Experiment Configuration =====\n\n")
+
+        # Command-line arguments actually used in this run
+        for key, value in sorted(vars(args).items()):
+            f.write(f"{key}={value}\n")
+
+        # Derived settings
+        f.write("\n===== Derived Settings =====\n")
+        f.write(f"timestamp={current_time}\n")
+        f.write(f"target_subject={sub}\n")
+        f.write(f"train_subjects={','.join(train_subjects)}\n")
+        f.write(f"feature_dim={feature_dim}\n")
+
+        # Git information
+        try:
+            git_branch = subprocess.check_output(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                text=True,
+            ).strip()
+
+            git_commit = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"],
+                text=True,
+            ).strip()
+
+            git_status = subprocess.check_output(
+                ["git", "status", "--porcelain"],
+                text=True,
+            ).strip()
+
+            git_dirty = bool(git_status)
+
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            git_branch = "unknown"
+            git_commit = "unknown"
+            git_dirty = "unknown"
+
+        f.write("\n===== Git =====\n")
+        f.write(f"branch={git_branch}\n")
+        f.write(f"commit={git_commit}\n")
+        f.write(f"dirty={git_dirty}\n")
+
+        # Exact command used to start train.py
+        f.write("\n===== Command =====\n")
+        f.write(" ".join(sys.argv) + "\n")
+
+    print(f"Experiment config: {experiment_config_path}")
+
     adapter_best_path = ""
 
     if args.train_adapter:
@@ -612,6 +699,10 @@ def main():
     best_val_rsa = -float('inf')
     best_val_acc = 0.0
     best_encoder_epoch = 0
+    if args.checkpoint_criterion == 'val_rsa_pearson':
+        best_checkpoint_score = -float('inf')
+    else:
+        best_checkpoint_score = float('inf')
     best_prior_val_loss = float("inf")
     best_prior_epoch = 0
     patience_counter = 0
@@ -787,7 +878,7 @@ def main():
             prior_val_loss = validate_prior_one_epoch(pipe, prior_val_loader, seed=args.seed,)
 
         # 3. Evaluate on VALIDATION set (never test set)
-        val_loss, val_acc, val_components, val_rsa = evaluate_val(
+        val_loss, val_acc, val_components, val_rsa_pearson, val_rdm_mse = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
             k=200, loss_mode='generation', alpha=0.99,
             rsa_weight=args.rsa_weight,
@@ -806,8 +897,23 @@ def main():
                 f"RSA={val_components['rsa_term']:.6f}"
             )
 
-        if val_rsa is not None:
-            print(f"[Validation full RSA] RSA={val_rsa:.6f}")
+        val_base_loss = None
+        val_total_loss = val_loss
+
+        if val_components is not None:
+            val_base_loss = (
+                val_components["mse_term"]
+                + val_components["clip_term"]
+            )
+
+
+
+        if val_rsa_pearson is not None:
+            print(
+                f"[Validation full metrics] "
+                f"RSA Pearson={val_rsa_pearson:.6f}, "
+                f"RDM MSE={val_rdm_mse:.6f}"
+            )
         
         # 4. Logging
         epoch_results = {
@@ -815,8 +921,10 @@ def main():
             "train_loss": f"{train_loss:.4f}" if train_loss is not None else "N/A",
             "train_acc": f"{train_acc:.4f}" if train_acc is not None else "N/A",
             "val_loss": f"{val_loss:.4f}",
-            "val_acc": f"{val_acc:.4f}",
-            "val_rsa": f"{val_rsa:.6f}" if val_rsa is not None else "N/A",
+            "val_base_loss": f"{val_base_loss:.6f}" if val_base_loss is not None else "N/A",
+            "val_total_loss": f"{val_total_loss:.6f}", "val_acc": f"{val_acc:.4f}",
+            "val_rsa_pearson": f"{val_rsa_pearson:.6f}" if val_rsa_pearson is not None else "N/A",
+            "val_rdm_mse": f"{val_rdm_mse:.6f}" if val_rdm_mse is not None else "N/A",
             "prior_loss": f"{prior_loss:.4f}" if prior_loss is not None else "N/A",
             "prior_val_loss": f"{prior_val_loss:.4f}" if prior_val_loss is not None else "N/A",
         }
@@ -848,10 +956,34 @@ def main():
 
         # 5. Model selection & early stopping
         if not is_prior_phase:
-            # Phase 1: select best encoder by validation RSA
-            if val_rsa is not None and val_rsa > best_val_rsa:
-                best_val_rsa = val_rsa
+            # Phase 1: select best encoder by the requested validation criterion
+            checkpoint_values = {
+                'val_base_loss': val_base_loss,
+                'val_total_loss': val_total_loss,
+                'val_rsa_pearson': val_rsa_pearson,
+                'val_rdm_mse': val_rdm_mse,
+            }
+
+            current_checkpoint_score = checkpoint_values[
+                args.checkpoint_criterion
+            ]
+
+            if args.checkpoint_criterion == 'val_rsa_pearson':
+                improved = (
+                    current_checkpoint_score is not None
+                    and current_checkpoint_score > best_checkpoint_score
+                )
+            else:
+                improved = (
+                    current_checkpoint_score is not None
+                    and current_checkpoint_score < best_checkpoint_score
+                )
+
+            if improved:
+                best_checkpoint_score = current_checkpoint_score
+
                 best_val_loss = val_loss
+                best_val_rsa = val_rsa_pearson
                 best_val_acc = val_acc
                 best_encoder_epoch = epoch + 1
                 patience_counter = 0
@@ -863,9 +995,11 @@ def main():
 
                 print(
                     f"  ★ New best encoder: "
-                    f"val_rsa={best_val_rsa:.6f} "
-                    f"val_loss={best_val_loss:.4f} "
-                    f"acc={best_val_acc:.4f}"
+                    f"{args.checkpoint_criterion}="
+                    f"{best_checkpoint_score:.6f} "
+                    f"| val_loss={best_val_loss:.4f} "
+                    f"| val_rsa_pearson={best_val_rsa:.6f} "
+                    f"| acc={best_val_acc:.4f}"
                 )
             else:
                 patience_counter += 1
@@ -1072,6 +1206,39 @@ def main():
         writer.writeheader()
         writer.writerows(results)
     print(f"Training log: {results_file}")
+
+    # ── Save experiment summary ─────────────────────────────────────────────
+    experiment_summary_path = os.path.join(
+        results_dir,
+        "experiment_summary.txt",
+    )
+
+    with open(experiment_summary_path, "w") as f:
+        f.write("===== Experiment Summary =====\n\n")
+
+        f.write(f"best_encoder_epoch={best_encoder_epoch}\n")
+        f.write(
+            f"checkpoint_criterion="
+            f"{args.checkpoint_criterion}\n"
+        )
+        f.write(
+            f"best_checkpoint_score="
+            f"{best_checkpoint_score:.6f}\n"
+        )
+        f.write(f"best_val_loss={best_val_loss:.6f}\n")
+        f.write(f"best_val_rsa_pearson={best_val_rsa:.6f}\n")
+        f.write(f"best_val_acc={best_val_acc:.6f}\n")
+        f.write(f"encoder_path={best_encoder_path}\n")
+
+        if not args.encoder_only:
+            f.write(f"best_prior_epoch={best_prior_epoch}\n")
+            f.write(
+                f"best_prior_val_loss="
+                f"{best_prior_val_loss:.6f}\n"
+            )
+            f.write(f"prior_path={best_prior_path}\n")
+
+    print(f"Experiment summary: {experiment_summary_path}")
 
     # ── Write paths info for the evaluation script ───────────────────────
     info_path = os.path.join(results_dir, 'paths_info.txt')

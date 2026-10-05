@@ -512,7 +512,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
             img_features_full,
         )
         val_rsa = (1.0 - rsa_loss_full).item()
-    
+
     return (
         total_loss / num_batches,
         correct / total,
