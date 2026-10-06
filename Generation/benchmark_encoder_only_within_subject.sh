@@ -52,16 +52,27 @@ VAL_RATIO="${VAL_RATIO:-0.1}"
 PATIENCE="${PATIENCE:-50}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
 
-# CLIP projected feature space (1024-D) is the default baseline.
-FEATURE_SPACE="${FEATURE_SPACE:-clip}"
-if [ "${FEATURE_SPACE}" != "clip" ] && [ "${FEATURE_SPACE}" != "cls" ]; then
-    echo "[ERROR] FEATURE_SPACE must be clip or cls"
+# Image encoder used for teacher image features.
+IMAGE_ENCODER="${IMAGE_ENCODER:-clip}"
+
+if [ "${IMAGE_ENCODER}" != "clip" ] && \
+   [ "${IMAGE_ENCODER}" != "dinov3" ] && \
+   [ "${IMAGE_ENCODER}" != "siglip2" ]; then
+    echo "[ERROR] IMAGE_ENCODER must be clip, dinov3, or siglip2"
     exit 1
 fi
-# Keep encoder-only artifacts separate from the original benchmark.
-MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only/${FEATURE_SPACE}}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/${FEATURE_SPACE}}"
 
+# Legacy CLIP feature-space option.
+# New image encoders use the 1024-D image-feature path.
+FEATURE_SPACE="${FEATURE_SPACE:-clip}"
+
+if [ "${IMAGE_ENCODER}" != "clip" ]; then
+    FEATURE_SPACE="clip"
+fi
+
+# Keep results from different image encoders separate.
+MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only/${IMAGE_ENCODER}}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/${IMAGE_ENCODER}}"
 
 NUM_GEN_PER_CLASS="${NUM_GEN_PER_CLASS:-1}"
 SDXL_INFERENCE_STEPS="${SDXL_INFERENCE_STEPS:-4}"
@@ -92,6 +103,7 @@ if [ -n "${TRAIN_FEATURES_PATH}" ]; then
 else
     echo "  Train features:  default"
 fi
+echo "  Image encoder:   ${IMAGE_ENCODER}"
 echo "  Method:          ${METHOD}"
 echo "  Experiment type: ${EXPERIMENT_TYPE}"
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
@@ -158,6 +170,7 @@ for SUBJECT in ${SUBJECTS}; do
             --save_interval "${SAVE_INTERVAL}"
             --val_ratio "${VAL_RATIO}"
             --patience "${PATIENCE}"
+            --image_encoder "${IMAGE_ENCODER}"
             --feature_space "${FEATURE_SPACE}"
         )
 
@@ -210,6 +223,7 @@ for SUBJECT in ${SUBJECTS}; do
         --num_gen_per_class "${NUM_GEN_PER_CLASS}"
         --sdxl_steps "${SDXL_INFERENCE_STEPS}"
         --gen_batch_size "${GEN_BATCH_SIZE}"
+        --image_encoder "${IMAGE_ENCODER}"
         --feature_space "${FEATURE_SPACE}"
         --gpu "${GPU}"
         --seed "${SEED}"

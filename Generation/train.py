@@ -32,7 +32,10 @@ from torch.utils.data import DataLoader, Subset, TensorDataset
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from eegdatasets import EEGDataset
+from eegdatasets import (
+    EEGDataset,
+    get_image_encoder_feature_dim,
+)
 from diffusion_prior import DiffusionPriorUNet, EmbeddingDataset, Pipe
 from models.atms import ATMS, extract_id_from_string
 from models.eeg_clip_adapter import EEGCLIPAdapter
@@ -312,6 +315,16 @@ def main():
     )
     parser.add_argument('--subject', type=str, default='sub-08')
     parser.add_argument(
+        '--image_encoder',
+        type=str,
+        default='clip',
+        choices=['clip', 'dinov3', 'siglip2'],
+        help=(
+            "Image encoder used to provide teacher image features. "
+            "Default: clip."
+        ),
+    )
+    parser.add_argument(
         '--train_subjects',
         nargs='+',
         default=None,
@@ -376,9 +389,23 @@ def main():
     parser.add_argument("--adapter_lr",type=float,default=1e-4,)
     parser.add_argument("--adapter_batch_size",type=int,default=1024,)
     parser.add_argument("--adapter_patience", type=int,default=10,)
-    parser.add_argument("--feature_space",choices=["clip", "cls"],default="cls",
-                        help=("Image feature space: ""'clip'=1024-D projected CLIP, ""'cls'=1280-D pre-projection CLS"),)
+    parser.add_argument(
+        "--feature_space",
+        choices=["clip", "cls"],
+        default="clip",
+        help=(
+            "Image feature space. "
+            "'clip' is the default and is used for image-encoder comparison. "
+            "'cls' is kept only for legacy CLIP experiments."
+        ),
+    )
     args = parser.parse_args()
+
+    if args.image_encoder != "clip" and args.feature_space != "clip":
+        raise ValueError(
+            "--feature_space cls is only supported with "
+            "--image_encoder clip."
+        )
 
     if args.train_adapter and args.feature_space != "cls":
         raise ValueError(
@@ -442,12 +469,19 @@ def main():
         if args.encoder_only
         else int(args.total_epochs * args.encoder_only_ratio)
     )
-    feature_dim = (1024 if args.feature_space == "clip" else 1280)
+
+    if args.image_encoder == "clip" and args.feature_space == "cls":
+        feature_dim = 1280
+    else:
+        feature_dim = get_image_encoder_feature_dim(
+            args.image_encoder
+        )
 
     # ── Data ─────────────────────────────────────────────────────────────
     full_train_dataset = EEGDataset(args.data_path,
                                     img_dir_training=args.img_dir_training,
                                     img_dir_test=args.img_dir_test,
+                                    feature_type=args.image_encoder,
                                     features_dir=args.features_dir,
                                     features_path=args.features_path,
                                     subjects=train_subjects,

@@ -42,6 +42,8 @@ FEATURE_TRANSFORM_CHOICES = [
 
 FEATURE_SOURCE_FILES = {
     "clip": "ViT-H-14_features_train.pt",
+    "dinov3": "DINOv3-ViTL16_features_train.pt",
+    "siglip2": "SigLIP2-Large-Patch16-256_features_train.pt",
 }
 
 from pathlib import Path

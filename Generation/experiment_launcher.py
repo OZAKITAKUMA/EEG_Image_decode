@@ -284,7 +284,13 @@ def main():
             FEATURE_SOURCE_FILES[config["image_encoder"]],
         )
 
+        if not os.path.exists(source_features_path):
+            raise FileNotFoundError(
+                f"Source feature cache not found: {source_features_path}"
+            )
+        
         if not os.path.exists(config["train_features_path"]):
+            
             print(
                 "\nSVD feature cacheが見つからないため生成します:"
             )
