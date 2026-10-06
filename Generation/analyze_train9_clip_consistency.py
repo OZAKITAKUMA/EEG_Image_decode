@@ -251,117 +251,62 @@ def compute_train9_consistency(
 ):
     """
     各classについて、
-    train 9画像のCLIP空間内ばらつきを計算する。
+    L2正規化後のtrain 9画像のクラス内分散を計算する。
 
     train_features:
         (1654, 9, 1024)
 
     Returns:
-        pairwise_mean_distance:
-            (1654,)
-
-        centroid_mean_distance:
+        class_variances:
             (1654,)
     """
 
-    train_n = F.normalize(
+    # 各特徴ベクトルをL2正規化
+    # (1654, 9, 1024)
+    normalized_features = F.normalize(
         train_features.float(),
         dim=-1,
     )
 
-    pairwise_mean_distances = []
-    centroid_mean_distances = []
+    # 各クラスの平均特徴量 μ
+    # (1654, 9, 1024)
+    #          ↓
+    # (1654, 1, 1024)
+    class_means = normalized_features.mean(
+        dim=1,
+        keepdim=True,
+    )
 
-    for class_idx in range(
-        N_CLASSES
-    ):
-        features = train_n[
-            class_idx
-        ]
+    # x_i - μ
+    # (1654, 9, 1024)
+    centered_features = (
+        normalized_features
+        - class_means
+    )
 
-        # --------------------------------------------
-        # 1. 9画像どうしの平均cosine distance
-        # --------------------------------------------
+    # ||x_i - μ||^2
+    # (1654, 9, 1024)
+    #          ↓
+    # (1654, 9)
+    squared_distances = (
+        centered_features
+        .pow(2)
+        .sum(dim=-1)
+    )
 
-        similarity_matrix = (
-            features
-            @ features.T
-        )
-
-        distance_matrix = (
-            1.0
-            - similarity_matrix
-        )
-
-        upper_indices = torch.triu_indices(
-            9,
-            9,
-            offset=1,
-        )
-
-        pairwise_distances = (
-            distance_matrix[
-                upper_indices[0],
-                upper_indices[1],
-            ]
-        )
-
-        pairwise_mean_distance = (
-            pairwise_distances
-            .mean()
-            .item()
-        )
-
-        # --------------------------------------------
-        # 2. train 9画像の中心までの平均距離
-        # --------------------------------------------
-
-        centroid = (
-            features
-            .mean(
-                dim=0,
-                keepdim=True,
-            )
-        )
-
-        centroid = F.normalize(
-            centroid,
-            dim=-1,
-        )
-
-        centroid_similarity = (
-            features
-            @ centroid.T
-        ).squeeze(1)
-
-        centroid_distances = (
-            1.0
-            - centroid_similarity
-        )
-
-        centroid_mean_distance = (
-            centroid_distances
-            .mean()
-            .item()
-        )
-
-        pairwise_mean_distances.append(
-            pairwise_mean_distance
-        )
-
-        centroid_mean_distances.append(
-            centroid_mean_distance
-        )
+    # V_c = 1/N Σ ||x_i - μ||^2
+    # (1654, 9)
+    #      ↓
+    # (1654,)
+    class_variances = (
+        squared_distances
+        .mean(dim=1)
+    )
 
     return (
-        np.asarray(
-            pairwise_mean_distances,
-            dtype=float,
-        ),
-        np.asarray(
-            centroid_mean_distances,
-            dtype=float,
-        ),
+        class_variances
+        .cpu()
+        .numpy()
     )
 
 def compute_train_gt_prediction_distance(
@@ -565,11 +510,10 @@ def main():
         prediction_features.shape,
     )
 
-    (
-        prediction_pairwise_mean_distances,
-        prediction_centroid_mean_distances,
-    ) = compute_train9_consistency(
-        prediction_features
+    prediction_class_variances = (
+        compute_train9_consistency(
+            prediction_features
+        )
     )
 
 
@@ -644,48 +588,20 @@ def main():
         f"{train_gt_pred_class_mean.max():.4f}",
     )
     
-    (
-        pairwise_mean_distances,
-        centroid_mean_distances,
-    ) = compute_train9_consistency(
-        train_features
+    teacher_class_variances = (
+        compute_train9_consistency(
+            train_features
+        )
     )
 
-    results_df = pd.DataFrame({
-        "class_index":
-            np.arange(
-                N_CLASSES
-            ),
-
-        "teacher_pairwise_mean_distance":
-            pairwise_mean_distances,
-
-        "teacher_centroid_mean_distance":
-            centroid_mean_distances,
-
-        "prediction_pairwise_mean_distance":
-            prediction_pairwise_mean_distances,
-
-        "prediction_centroid_mean_distance":
-            prediction_centroid_mean_distances,
-
-        "train_gt_prediction_mean_distance":
-            train_gt_pred_class_mean,
-
-        "spread_ratio":
-            (
-                prediction_pairwise_mean_distances
-                / pairwise_mean_distances
-            ),
-    })
-
-        # ========================================================
+    
+    # ========================================================
     # Class-wise results
     # ========================================================
 
-    spread_ratio = (
-        prediction_pairwise_mean_distances
-        / pairwise_mean_distances
+    variance_ratio = (
+        prediction_class_variances
+        / teacher_class_variances
     )
 
     results_df = pd.DataFrame({
@@ -694,23 +610,17 @@ def main():
                 N_CLASSES
             ),
 
-        "teacher_pairwise_mean_distance":
-            pairwise_mean_distances,
+        "teacher_class_variance":
+            teacher_class_variances,
 
-        "teacher_centroid_mean_distance":
-            centroid_mean_distances,
-
-        "prediction_pairwise_mean_distance":
-            prediction_pairwise_mean_distances,
-
-        "prediction_centroid_mean_distance":
-            prediction_centroid_mean_distances,
+        "prediction_class_variance":
+            prediction_class_variances,
 
         "train_gt_prediction_mean_distance":
             train_gt_pred_class_mean,
 
-        "spread_ratio":
-            spread_ratio,
+        "variance_ratio":
+            variance_ratio,
     })
 
     output_csv = os.path.join(
@@ -764,7 +674,7 @@ def main():
     )
 
     # ========================================================
-    # Teacher CLIP spread
+    # Teacher CLIP class variance
     # ========================================================
 
     print(
@@ -773,7 +683,7 @@ def main():
     )
 
     print(
-        "TEACHER TRAIN-9 CLIP SPREAD"
+        "TEACHER TRAIN-9 CLASS VARIANCE"
     )
 
     print(
@@ -781,31 +691,31 @@ def main():
     )
 
     print(
-        "Pairwise mean distance"
+        "Class variance"
     )
 
     print(
         "  mean:",
-        f"{pairwise_mean_distances.mean():.4f}",
+        f"{teacher_class_variances.mean():.4f}",
     )
 
     print(
         "  median:",
-        f"{np.median(pairwise_mean_distances):.4f}",
+        f"{np.median(teacher_class_variances):.4f}",
     )
 
     print(
         "  min:",
-        f"{pairwise_mean_distances.min():.4f}",
+        f"{teacher_class_variances.min():.4f}",
     )
 
     print(
         "  max:",
-        f"{pairwise_mean_distances.max():.4f}",
+        f"{teacher_class_variances.max():.4f}",
     )
 
-    # ========================================================
-    # Prediction spread
+        # ========================================================
+    # Prediction class variance
     # ========================================================
 
     print(
@@ -814,7 +724,7 @@ def main():
     )
 
     print(
-        "EEG PREDICTION TRAIN-9 SPREAD"
+        "EEG PREDICTION TRAIN-9 CLASS VARIANCE"
     )
 
     print(
@@ -822,37 +732,37 @@ def main():
     )
 
     print(
-        "Pairwise mean distance"
+        "Class variance"
     )
 
     print(
         "  mean:",
-        f"{prediction_pairwise_mean_distances.mean():.4f}",
+        f"{prediction_class_variances.mean():.4f}",
     )
 
     print(
         "  median:",
-        f"{np.median(prediction_pairwise_mean_distances):.4f}",
+        f"{np.median(prediction_class_variances):.4f}",
     )
 
     print(
         "  min:",
-        f"{prediction_pairwise_mean_distances.min():.4f}",
+        f"{prediction_class_variances.min():.4f}",
     )
 
     print(
         "  max:",
-        f"{prediction_pairwise_mean_distances.max():.4f}",
+        f"{prediction_class_variances.max():.4f}",
     )
 
     # ========================================================
-    # Teacher vs Prediction spread
+    # Teacher vs Prediction class variance
     # ========================================================
 
-    n_prediction_narrower = int(
+    n_prediction_lower_variance = int(
         (
-            prediction_pairwise_mean_distances
-            < pairwise_mean_distances
+            prediction_class_variances
+            < teacher_class_variances
         ).sum()
     )
 
@@ -862,7 +772,7 @@ def main():
     )
 
     print(
-        "TEACHER VS PREDICTION SPREAD"
+        "TEACHER VS PREDICTION CLASS VARIANCE"
     )
 
     print(
@@ -870,20 +780,20 @@ def main():
     )
 
     print(
-        "Mean spread ratio:",
-        f"{spread_ratio.mean():.4f}",
+        "Mean variance ratio:",
+        f"{variance_ratio.mean():.4f}",
     )
 
     print(
-        "Median spread ratio:",
-        f"{np.median(spread_ratio):.4f}",
+        "Median variance ratio:",
+        f"{np.median(variance_ratio):.4f}",
     )
 
     print(
-        "Prediction narrower than teacher:",
-        f"{n_prediction_narrower}/"
+        "Prediction variance lower than teacher:",
+        f"{n_prediction_lower_variance}/"
         f"{N_CLASSES} "
-        f"({100.0 * n_prediction_narrower / N_CLASSES:.1f}%)",
+        f"({100.0 * n_prediction_lower_variance / N_CLASSES:.1f}%)",
     )
 
     # ========================================================
@@ -953,21 +863,21 @@ def main():
         f"{train_gt_pred_class_mean.max():.4f}",
     )
 
-    # ========================================================
+        # ========================================================
     # Relation:
-    # teacher spread vs fitting difficulty
+    # teacher class variance vs fitting difficulty
     # ========================================================
 
-    teacher_spread_series = pd.Series(
-        pairwise_mean_distances
+    teacher_variance_series = pd.Series(
+        teacher_class_variances
     )
 
     gt_pred_series = pd.Series(
         train_gt_pred_class_mean
     )
 
-    spread_fit_corr = (
-        teacher_spread_series.corr(
+    variance_fit_corr = (
+        teacher_variance_series.corr(
             gt_pred_series,
             method="spearman",
         )
@@ -979,7 +889,7 @@ def main():
     )
 
     print(
-        "TEACHER SPREAD VS GT-PREDICTION DISTANCE"
+        "TEACHER CLASS VARIANCE VS GT-PREDICTION DISTANCE"
     )
 
     print(
@@ -988,21 +898,12 @@ def main():
 
     print(
         "Spearman rho:",
-        f"{spread_fit_corr:.4f}",
-    )
-
-    print(
-        "\nSaved:"
-    )
-
-    print(
-        output_csv
-    )
-
-    print(
-        stimulus_csv
+        f"{variance_fit_corr:.4f}",
     )
 
 
 if __name__ == "__main__":
     main()
+
+
+# python Generation/analyze_train9_clip_consistency.py --checkpoint /home/moepy/ozakitakuma/EEG_Image_decode_develop/Generation/models/baseline/clip/full/mse_contrastive/val_rdm_mse/encoder/sub-01/10-06_05-03/best.pth
