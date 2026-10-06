@@ -2,8 +2,16 @@
 
 DEFAULT_CONFIG = {
     "subjects": (
-        "sub-01 sub-02 sub-03 sub-04 sub-05 "
-        "sub-06 sub-07 sub-08 sub-09 sub-10"
+        "sub-01 "
+        # "sub-02 "
+        # "sub-03 "
+        # "sub-04 "
+        # "sub-05 "
+        # "sub-06 "
+        # "sub-07 "
+        # "sub-08 "
+        # "sub-09 "
+        # "sub-10"
     ),
     "image_encoder": "clip",
     "feature_space": "clip",

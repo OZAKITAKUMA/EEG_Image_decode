@@ -663,6 +663,33 @@ def main():
         print(f"Retrieval Top-1: {top1_acc.item():.4f}")
         print(f"Retrieval Top-5: {top5_acc.item():.4f}")
 
+        retrieval_df = pd.DataFrame({
+            "Metric": [
+                "Retrieval Top-1",
+                "Retrieval Top-5",
+            ],
+            "Mean": [
+                f"{top1_acc.item():.4f}",
+                f"{top5_acc.item():.4f}",
+            ],
+        })
+
+        retrieval_results_path = os.path.join(
+            args.output_dir,
+            f"retrieval_metrics_{sub}_encoder_only.csv",
+        )
+
+        retrieval_df.to_csv(
+            retrieval_results_path,
+            sep="\t",
+            index=False,
+        )
+
+        print(
+            f"Retrieval metrics saved to: "
+            f"{retrieval_results_path}"
+        )
+
         # Non-CLIP image features cannot be passed directly to
         # the current CLIP/IP-Adapter generation pipeline.
         if args.image_encoder != "clip":

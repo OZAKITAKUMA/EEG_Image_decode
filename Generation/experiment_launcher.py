@@ -94,6 +94,11 @@ def validate_config(config):
                 "SVD rankは1以上にしてください。"
             )
 
+        elif config["svd_rank"] > 1024:
+            errors.append(
+                "SVD rankは1024以下にしてください。"
+            )
+
         if config["image_encoder"] not in FEATURE_SOURCE_FILES:
             errors.append(
                 "選択したImage Encoderの元特徴ファイルが"

@@ -597,7 +597,7 @@ def main():
     print(f"  Feature dim:       {feature_dim}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
-    print(f"  Encoder selection: {args.encoder_selection_metric}")
+    print(f"  Checkpoint criterion: {args.checkpoint_criterion}")
     print(f"  Target subject:    {sub}")
     print(f"  Train subjects:    {', '.join(train_subjects)}")
     print(f"  Excluded subject:  {args.exclude_subject}")
@@ -1289,7 +1289,7 @@ def main():
         f.write(f"feature_space="f"{args.feature_space}\n")
         f.write(f"feature_dim="f"{feature_dim}\n")
         f.write(f"encoder_only={str(args.encoder_only).lower()}\n")
-        f.write(f"encoder_selection_metric={args.encoder_selection_metric}\n")
+        f.write(f"checkpoint_criterion={args.checkpoint_criterion}\n")
     print(f"Paths info:   {info_path}")
 
 

@@ -502,6 +502,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
         }
 
     val_rsa = None
+    val_rdm_mse = None
 
     if loss_mode == 'generation' and all_eeg_features:
         eeg_features_full = torch.cat(all_eeg_features, dim=0)
@@ -513,11 +514,18 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
         )
         val_rsa = (1.0 - rsa_loss_full).item()
 
+        rdm_mse_full = _compute_rdm_mse_loss(
+            eeg_features_full,
+            img_features_full,
+        )
+        val_rdm_mse = rdm_mse_full.item()
+
     return (
         total_loss / num_batches,
         correct / total,
         avg_components,
         val_rsa,
+        val_rdm_mse,
     )
 
 def analyze_topk_neighbors(

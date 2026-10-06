@@ -169,9 +169,14 @@ for SUBJECT in ${SUBJECTS}; do
         continue
     fi
 
-    METRIC_FILE="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+    if [ "${IMAGE_ENCODER}" = "clip" ]; then
+        METRIC_FILE="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+    else
+        METRIC_FILE="${EVAL_OUTPUT_DIR}/retrieval_metrics_${SUBJECT}_encoder_only.csv"
+    fi
+
     if [ ! -f "${METRIC_FILE}" ]; then
-        echo "[WARN] Encoder-only metrics missing: ${METRIC_FILE}"
+        echo "[WARN] Metrics missing: ${METRIC_FILE}"
         continue
     fi
 
