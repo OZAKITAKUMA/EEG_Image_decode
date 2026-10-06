@@ -1,0 +1,157 @@
+# Default settings shared by experiment launchers.
+
+DEFAULT_CONFIG = {
+    "subjects": (
+        "sub-01 sub-02 sub-03 sub-04 sub-05 "
+        "sub-06 sub-07 sub-08 sub-09 sub-10"
+    ),
+    "image_encoder": "clip",
+    "feature_space": "clip",
+    "method": "baseline",
+    "feature_transform": "full",
+    "svd_rank": None,
+
+    "encoder_epochs": 100,
+    "batch_size": 64,
+    "lr_encoder": 3e-4,
+
+    "rsa_weight": 0.0,
+    "rsa_loss_type": "pearson",
+    "checkpoint_criterion": "val_rsa_pearson",
+
+    "val_ratio": 0.1,
+    "patience": 50,
+    "save_interval": 10,
+
+    "avg_trials": True,
+    "seed": 42,
+    "gpu": "cuda:0",
+}
+
+
+IMAGE_ENCODER_CHOICES = [
+    "clip",
+    "dinov3",
+    "siglip2",
+]
+
+FEATURE_TRANSFORM_CHOICES = [
+    "full",
+    "svd",
+]
+
+FEATURE_SOURCE_FILES = {
+    "clip": "ViT-H-14_features_train.pt",
+}
+
+from pathlib import Path
+
+
+RSA_LOSS_TYPE_CHOICES = [
+    "pearson",
+    "rdm_mse",
+]
+
+
+CHECKPOINT_CRITERION_CHOICES = [
+    "val_base_loss",
+    "val_total_loss",
+    "val_rsa_pearson",
+    "val_rdm_mse",
+]
+
+EXPERIMENT_TYPE_CHOICES = [
+    "image_encoder_compare",
+    "svd_compare",
+    "loss_compare",
+    "subject_compare",
+]
+
+
+EXPERIMENT_PROFILES = {
+    "image_encoder_compare": [
+        "image_encoder",
+        "checkpoint_criterion",
+    ],
+
+    "svd_compare": [
+        "image_encoder",
+        "feature_transform",
+        "rsa_loss_type",
+        "rsa_weight",
+        "checkpoint_criterion",
+    ],
+
+    "loss_compare": [
+        "rsa_loss_type",
+        "rsa_weight",
+        "checkpoint_criterion",
+    ],
+
+    "subject_compare": [
+        "subjects",
+    ],
+}
+
+
+def format_weight_for_path(weight):
+    """Convert a numeric weight to a filename-safe string."""
+    return f"{weight:g}".replace(".", "p")
+
+def build_feature_filename(config):
+    """Return the training feature-cache filename for this experiment."""
+
+    image_encoder = config["image_encoder"]
+
+    source_filename = FEATURE_SOURCE_FILES[image_encoder]
+
+    if config["feature_transform"] != "svd":
+        return source_filename
+
+    source_path = Path(source_filename)
+
+    return (
+        f"{source_path.stem}_"
+        f"svd{config['svd_rank']}"
+        f"{source_path.suffix}"
+    )
+
+def build_loss_name(config):
+    """Build a directory name representing the training loss."""
+
+    rsa_weight = config["rsa_weight"]
+
+    # RSAを使わない場合
+    if rsa_weight == 0:
+        return "mse_contrastive"
+
+    # RSAを使う場合
+    rsa_loss_type = config["rsa_loss_type"]
+    weight_str = format_weight_for_path(rsa_weight)
+
+    return (
+        f"mse_contrastive_"
+        f"rsa_{rsa_loss_type}_"
+        f"w{weight_str}"
+    )
+
+def build_experiment_path(config):
+    """Build the directory hierarchy for one experiment."""
+
+    image_encoder = config["image_encoder"]
+    method = config["method"]
+    loss_name = build_loss_name(config)
+    checkpoint_criterion = config["checkpoint_criterion"]
+
+    if config["feature_transform"] == "svd":
+        feature_variant = f"svd_{config['svd_rank']}"
+    else:
+        feature_variant = "full"
+
+    return (
+        f"{method}/"
+        f"{image_encoder}/"
+        f"{feature_variant}/"
+        f"{loss_name}/"
+        f"{checkpoint_criterion}"
+    )
