@@ -17,7 +17,11 @@ DEFAULT_CONFIG = {
     "feature_space": "clip",
     "method": "baseline",
     "feature_transform": "full",
+    "svd_centering": "global",
+    "svd_component_mode": "keep_top_rank",
     "svd_rank": None,
+    "svd_remove_count": None,
+    "svd_remove_start": None,
 
     "encoder_epochs": 100,
     "batch_size": 64,
@@ -46,6 +50,19 @@ IMAGE_ENCODER_CHOICES = [
 FEATURE_TRANSFORM_CHOICES = [
     "full",
     "svd",
+]
+
+SVD_CENTERING_CHOICES = [
+    "global",
+    "class",
+]
+
+SVD_COMPONENT_MODE_CHOICES = [
+    "keep_top_rank",
+    "remove_top",
+    "remove_middle",
+    "remove_bottom",
+    "remove_range",
 ]
 
 FEATURE_SOURCE_FILES = {
@@ -109,6 +126,66 @@ def format_weight_for_path(weight):
     """Convert a numeric weight to a filename-safe string."""
     return f"{weight:g}".replace(".", "p")
 
+def build_svd_cache_tag(config):
+    """Build the suffix used by an SVD-transformed feature cache."""
+
+    centering = config["svd_centering"]
+    mode = config["svd_component_mode"]
+
+    if mode == "keep_top_rank":
+        rank = config["svd_rank"]
+
+        # Keep the old global-SVD filename for backward compatibility.
+        if centering == "global":
+            return f"svd{rank}"
+
+        return f"svd_{centering}_keep{rank}"
+
+    remove_count = config["svd_remove_count"]
+
+    if mode == "remove_range":
+        start = config["svd_remove_start"]
+        end = start + remove_count - 1
+        return f"svd_{centering}_remove_pc{start}-{end}"
+
+    position = mode.removeprefix("remove_")
+
+    return (
+        f"svd_{centering}_"
+        f"remove_{position}{remove_count}"
+    )
+
+
+def build_svd_path_name(config):
+    """Build the directory name for one SVD feature variant."""
+
+    centering = config["svd_centering"]
+    mode = config["svd_component_mode"]
+
+    if mode == "keep_top_rank":
+        rank = config["svd_rank"]
+
+        # Preserve the directory layout of existing global-rank experiments.
+        if centering == "global":
+            return f"svd_{rank}"
+
+        return f"svd_{centering}_keep_{rank}"
+
+    remove_count = config["svd_remove_count"]
+
+    if mode == "remove_range":
+        start = config["svd_remove_start"]
+        end = start + remove_count - 1
+        return f"svd_{centering}_remove_pc_{start}-{end}"
+
+    position = mode.removeprefix("remove_")
+
+    return (
+        f"svd_{centering}_"
+        f"remove_{position}_{remove_count}"
+    )
+
+
 def build_feature_filename(config):
     """Return the training feature-cache filename for this experiment."""
 
@@ -120,10 +197,11 @@ def build_feature_filename(config):
         return source_filename
 
     source_path = Path(source_filename)
+    svd_tag = build_svd_cache_tag(config)
 
     return (
         f"{source_path.stem}_"
-        f"svd{config['svd_rank']}"
+        f"{svd_tag}"
         f"{source_path.suffix}"
     )
 
@@ -155,7 +233,7 @@ def build_experiment_path(config):
     checkpoint_criterion = config["checkpoint_criterion"]
 
     if config["feature_transform"] == "svd":
-        feature_variant = f"svd_{config['svd_rank']}"
+        feature_variant = build_svd_path_name(config)
     else:
         feature_variant = "full"
 
