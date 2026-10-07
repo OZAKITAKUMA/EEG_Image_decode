@@ -6,6 +6,8 @@ from experiment_config import (
     DEFAULT_CONFIG,
     IMAGE_ENCODER_CHOICES,
     FEATURE_TRANSFORM_CHOICES,
+    SVD_CENTERING_CHOICES,
+    SVD_COMPONENT_MODE_CHOICES,
     CHECKPOINT_CRITERION_CHOICES,
     RSA_LOSS_TYPE_CHOICES,
     EXPERIMENT_TYPE_CHOICES,
@@ -84,20 +86,47 @@ def validate_config(config):
     warnings = []
 
     if config["feature_transform"] == "svd":
-        if config["svd_rank"] is None:
-            errors.append(
-                "SVDを使う場合はsvd_rankを指定してください。"
-            )
+        mode = config["svd_component_mode"]
 
-        elif config["svd_rank"] <= 0:
-            errors.append(
-                "SVD rankは1以上にしてください。"
-            )
+        if mode == "keep_top_rank":
+            if config["svd_rank"] is None:
+                errors.append(
+                    "keep_top_rankではsvd_rankを指定してください。"
+                )
+            elif not 1 <= config["svd_rank"] <= 1024:
+                errors.append(
+                    "SVD rankは1以上1024以下にしてください。"
+                )
+        else:
+            remove_count = config["svd_remove_count"]
 
-        elif config["svd_rank"] > 1024:
-            errors.append(
-                "SVD rankは1024以下にしてください。"
-            )
+            if remove_count is None:
+                errors.append(
+                    "成分削除では削除数を指定してください。"
+                )
+            elif not 1 <= remove_count < 1024:
+                errors.append(
+                    "削除数は1以上1023以下にしてください。"
+                )
+
+            if mode == "remove_range":
+                start = config["svd_remove_start"]
+
+                if start is None:
+                    errors.append(
+                        "remove_rangeでは削除開始PCを指定してください。"
+                    )
+                elif not 1 <= start <= 1024:
+                    errors.append(
+                        "削除開始PCは1以上1024以下にしてください。"
+                    )
+                elif (
+                    remove_count is not None
+                    and start + remove_count - 1 > 1024
+                ):
+                    errors.append(
+                        "削除範囲がPC1024を超えています。"
+                    )
 
         if config["image_encoder"] not in FEATURE_SOURCE_FILES:
             errors.append(
@@ -174,12 +203,45 @@ def main():
             )
 
             if config["feature_transform"] == "svd":
-                config["svd_rank"] = ask_int(
-                    "SVD rankを入力してください。",
-                    960,
+                config["svd_centering"] = ask_choice(
+                    "SVDの中心化方法を選択してください。",
+                    SVD_CENTERING_CHOICES,
+                    config["svd_centering"],
                 )
+
+                config["svd_component_mode"] = ask_choice(
+                    "主成分の扱いを選択してください。",
+                    SVD_COMPONENT_MODE_CHOICES,
+                    config["svd_component_mode"],
+                )
+
+                if config["svd_component_mode"] == "keep_top_rank":
+                    config["svd_rank"] = ask_int(
+                        "保持するSVD rankを入力してください。",
+                        960,
+                    )
+                    config["svd_remove_count"] = None
+                    config["svd_remove_start"] = None
+
+                else:
+                    config["svd_rank"] = None
+                    config["svd_remove_count"] = ask_int(
+                        "削除する主成分数を入力してください。",
+                        10,
+                    )
+
+                    if config["svd_component_mode"] == "remove_range":
+                        config["svd_remove_start"] = ask_int(
+                            "削除を開始するPC番号（1始まり）を入力してください。",
+                            1,
+                        )
+                    else:
+                        config["svd_remove_start"] = None
+
             else:
                 config["svd_rank"] = None
+                config["svd_remove_count"] = None
+                config["svd_remove_start"] = None
         
         elif question == "rsa_loss_type":
             config["rsa_loss_type"] = ask_choice(
@@ -301,24 +363,45 @@ def main():
             )
             print(f"  {config['train_features_path']}")
 
-            subprocess.run(
-                [
-                    "python",
-                    os.path.join(
-                        os.path.dirname(os.path.abspath(__file__)),
-                        "create_svd_clip_features.py",
-                    ),
-                    "--train_features_path",
-                    source_features_path,
-                    "--output_dir",
-                    os.path.dirname(config["train_features_path"]),
-                    "--ranks",
+            svd_command = [
+                "python",
+                os.path.join(
+                    os.path.dirname(os.path.abspath(__file__)),
+                    "create_svd_clip_features.py",
+                ),
+                "--train_features_path",
+                source_features_path,
+                "--output_path",
+                config["train_features_path"],
+                "--centering",
+                config["svd_centering"],
+                "--component_mode",
+                config["svd_component_mode"],
+                "--seed",
+                str(config["seed"]),
+                "--val_ratio",
+                str(config["val_ratio"]),
+            ]
+
+            if config["svd_component_mode"] == "keep_top_rank":
+                svd_command.extend([
+                    "--rank",
                     str(config["svd_rank"]),
-                    "--seed",
-                    str(config["seed"]),
-                    "--val_ratio",
-                    str(config["val_ratio"]),
-                ],
+                ])
+            else:
+                svd_command.extend([
+                    "--remove_count",
+                    str(config["svd_remove_count"]),
+                ])
+
+                if config["svd_component_mode"] == "remove_range":
+                    svd_command.extend([
+                        "--remove_start",
+                        str(config["svd_remove_start"]),
+                    ])
+
+            subprocess.run(
+                svd_command,
                 check=True,
             )
 
