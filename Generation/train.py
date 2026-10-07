@@ -357,6 +357,8 @@ def main():
             'val_total_loss',
             'val_rsa_pearson',
             'val_rdm_mse',
+            'val_top1_accuracy',
+            'val_top5_accuracy',
         ],
         help=(
             "Criterion used to select the best EEG encoder checkpoint. "
@@ -364,6 +366,8 @@ def main():
             "'val_total_loss': base loss + RSA loss, "
             "'val_rsa_pearson': maximum validation RDM Pearson correlation, "
             "'val_rdm_mse': minimum validation RDM MSE."
+            "'val_top1_accuracy': maximum validation retrieval top1 accuracy."
+            "'val_top5_accuracy': maximum validation retrieval top5 accuracy."
         ),
     )
     parser.add_argument('--prior_epochs_per_step', type=int, default=1)
@@ -727,8 +731,13 @@ def main():
     best_val_loss = float('inf')
     best_val_rsa = -float('inf')
     best_val_acc = 0.0
+    best_val_top5_acc = 0.0
     best_encoder_epoch = 0
-    if args.checkpoint_criterion == 'val_rsa_pearson':
+    if args.checkpoint_criterion in (
+        'val_rsa_pearson',
+        'val_top1_accuracy',
+        'val_top5_accuracy',
+    ):
         best_checkpoint_score = -float('inf')
     else:
         best_checkpoint_score = float('inf')
@@ -907,12 +916,20 @@ def main():
             prior_val_loss = validate_prior_one_epoch(pipe, prior_val_loader, seed=args.seed,)
 
         # 3. Evaluate on VALIDATION set (never test set)
-        val_loss, val_acc, val_components, val_rsa_pearson, val_rdm_mse = evaluate_val(
+        val_loss, val_acc, val_top5_acc, val_components, val_rsa_pearson, val_rdm_mse = evaluate_val(
             sub, eeg_model, val_loader, device, img_features_per_class,
             k=200, loss_mode='generation', alpha=0.99,
             rsa_weight=args.rsa_weight,
             rsa_loss_type=args.rsa_loss_type,
             use_subject_id=not args.no_subject_id,
+            accuracy_seed=(
+                args.seed
+                if args.checkpoint_criterion in (
+                    "val_top1_accuracy",
+                    "val_top5_accuracy",
+                )
+                else None
+            ),
         )
 
         if val_components is not None:
@@ -951,7 +968,9 @@ def main():
             "train_acc": f"{train_acc:.4f}" if train_acc is not None else "N/A",
             "val_loss": f"{val_loss:.4f}",
             "val_base_loss": f"{val_base_loss:.6f}" if val_base_loss is not None else "N/A",
-            "val_total_loss": f"{val_total_loss:.6f}", "val_acc": f"{val_acc:.4f}",
+            "val_total_loss": f"{val_total_loss:.6f}", 
+            "val_acc": f"{val_acc:.4f}",
+            "val_top5_acc": f"{val_top5_acc:.4f}",
             "val_rsa_pearson": f"{val_rsa_pearson:.6f}" if val_rsa_pearson is not None else "N/A",
             "val_rdm_mse": f"{val_rdm_mse:.6f}" if val_rdm_mse is not None else "N/A",
             "prior_loss": f"{prior_loss:.4f}" if prior_loss is not None else "N/A",
@@ -970,7 +989,9 @@ def main():
         if not is_prior_phase:
             print(f"[{phase_str}] Epoch {epoch+1}/{args.total_epochs} "
                   f"| Train L={train_loss:.4f} A={train_acc:.4f} "
-                  f"| Val L={val_loss:.4f} A={val_acc:.4f}")
+                  f"| Val L={val_loss:.4f} A={val_acc:.4f}"
+                  f"Top1={val_acc:.4f} "
+                  f"Top5={val_top5_acc:.4f}")
         elif finetune:
             print(f"[{phase_str}] Epoch {epoch+1}/{args.total_epochs} "
                   f"| Train L={train_loss:.4f} A={train_acc:.4f} "
@@ -991,13 +1012,19 @@ def main():
                 'val_total_loss': val_total_loss,
                 'val_rsa_pearson': val_rsa_pearson,
                 'val_rdm_mse': val_rdm_mse,
+                'val_top1_accuracy': val_acc,
+                'val_top5_accuracy': val_top5_acc,
             }
 
             current_checkpoint_score = checkpoint_values[
                 args.checkpoint_criterion
             ]
 
-            if args.checkpoint_criterion == 'val_rsa_pearson':
+            if args.checkpoint_criterion in (
+                'val_rsa_pearson',
+                'val_top1_accuracy',
+                'val_top5_accuracy',
+            ):
                 improved = (
                     current_checkpoint_score is not None
                     and current_checkpoint_score > best_checkpoint_score
@@ -1014,6 +1041,7 @@ def main():
                 best_val_loss = val_loss
                 best_val_rsa = val_rsa_pearson
                 best_val_acc = val_acc
+                best_val_top5_acc = val_top5_acc
                 best_encoder_epoch = epoch + 1
                 patience_counter = 0
 
@@ -1031,7 +1059,8 @@ def main():
                     f"{best_checkpoint_score:.6f} "
                     f"| val_loss={best_val_loss:.4f} "
                     f"| val_rsa_pearson={best_val_rsa:.6f} "
-                    f"| acc={best_val_acc:.4f}"
+                    f"| Top1={best_val_acc:.4f} "
+                    f"| Top5={best_val_top5_acc:.4f}"
                 )
 
             else:
@@ -1218,7 +1247,12 @@ def main():
 
     print(f"\n{'='*55}")
     print(f"Training finished at epoch {epoch+1}")
-    print(f"Best encoder: epoch {best_encoder_epoch}  val_loss={best_val_loss:.4f}  val_acc={best_val_acc:.4f}")
+    print(
+        f"Best encoder: epoch {best_encoder_epoch}  "
+        f"val_loss={best_val_loss:.4f}  "
+        f"Top1={best_val_acc:.4f}  "
+        f"Top5={best_val_top5_acc:.4f}"
+    )
     if not args.encoder_only:
         print(f"Best prior: epoch {best_prior_epoch} " f"prior_val_loss={best_prior_val_loss:.4f}")
     print(f"  Encoder: {best_encoder_path}")

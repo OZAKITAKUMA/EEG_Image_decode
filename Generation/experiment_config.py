@@ -62,12 +62,13 @@ RSA_LOSS_TYPE_CHOICES = [
     "rdm_mse",
 ]
 
-
 CHECKPOINT_CRITERION_CHOICES = [
     "val_base_loss",
     "val_total_loss",
     "val_rsa_pearson",
     "val_rdm_mse",
+    "val_top1_accuracy",
+    "val_top5_accuracy",
 ]
 
 EXPERIMENT_TYPE_CHOICES = [

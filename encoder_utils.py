@@ -401,6 +401,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
                      rsa_weight: float = 0.0,
                      rsa_loss_type: str = "pearson",
                      use_subject_id: bool = True,
+                     accuracy_seed=None,
                      text_features_all=None):
     """
     Evaluate the ATMS encoder on a validation or test split.
@@ -417,6 +418,12 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
     img_pool = img_features_all.to(device).float()
     all_classes = set(range(img_pool.size(0)))
 
+    accuracy_rng = (
+        random.Random(accuracy_seed)
+        if accuracy_seed is not None
+        else None
+    )
+
     # subject_id = _extract_subject_id(sub)
     total_loss = 0.0
 
@@ -431,7 +438,8 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
             "rsa_term": 0.0,
         }
 
-    correct = 0
+    top1_correct = 0
+    top5_correct = 0
     total = 0
 
     all_eeg_features = []
@@ -480,14 +488,40 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
         # k-way retrieval
         for i, label in enumerate(labels):
             possible  = list(all_classes - {label.item()})
-            selected  = random.sample(possible, min(k - 1, len(possible))) + [label.item()]
+            if accuracy_rng is None:
+                selected = random.sample(
+                    possible,
+                    min(k - 1, len(possible))
+                ) + [label.item()]
+            else:
+                selected = accuracy_rng.sample(
+                    possible,
+                    min(k - 1, len(possible))
+                ) + [label.item()]
             sel_feats = img_pool[selected]
             logits    = _logits_for_accuracy(
                 eeg_features[i].unsqueeze(0), sel_feats,
                 model.logit_scale, loss_mode).squeeze(0)
-            pred = selected[torch.argmax(logits).item()]
-            if pred == label.item():
-                correct += 1
+            top1_pred = selected[
+                torch.argmax(logits).item()
+            ]
+
+            if top1_pred == label.item():
+                top1_correct += 1
+
+            top5_indices = torch.topk(
+                logits,
+                k=min(5, logits.numel())
+            ).indices.tolist()
+
+            top5_preds = [
+                selected[idx]
+                for idx in top5_indices
+            ]
+
+            if label.item() in top5_preds:
+                top5_correct += 1
+
             total += 1
 
         del eeg_data, eeg_features, img_feats
@@ -522,7 +556,8 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
 
     return (
         total_loss / num_batches,
-        correct / total,
+        top1_correct / total,
+        top5_correct / total,
         avg_components,
         val_rsa,
         val_rdm_mse,
