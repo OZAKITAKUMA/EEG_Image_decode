@@ -202,6 +202,129 @@ def detect_object_box(
     )
 
 
+def mask_bounding_box(mask):
+    ys, xs = np.where(mask)
+
+    if len(xs) == 0:
+        return None
+
+    return [
+        float(xs.min()),
+        float(ys.min()),
+        float(xs.max() + 1),
+        float(ys.max() + 1),
+    ]
+
+
+def box_iou(box_a, box_b):
+    if box_a is None or box_b is None:
+        return 0.0
+
+    ax1, ay1, ax2, ay2 = box_a
+    bx1, by1, bx2, by2 = box_b
+
+    ix1 = max(ax1, bx1)
+    iy1 = max(ay1, by1)
+    ix2 = min(ax2, bx2)
+    iy2 = min(ay2, by2)
+
+    inter_w = max(0.0, ix2 - ix1)
+    inter_h = max(0.0, iy2 - iy1)
+    inter = inter_w * inter_h
+
+    area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
+    area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
+
+    union = area_a + area_b - inter
+
+    if union <= 0:
+        return 0.0
+
+    return inter / union
+
+
+def mask_box_coverage(mask, box):
+    x1, y1, x2, y2 = box
+
+    box_area = max(
+        1.0,
+        (x2 - x1) * (y2 - y1),
+    )
+
+    return float(mask.sum()) / box_area
+
+
+def rectangle_mask(image, box):
+    x1, y1, x2, y2 = box
+
+    x1 = max(0, int(np.floor(x1)))
+    y1 = max(0, int(np.floor(y1)))
+    x2 = min(image.width, int(np.ceil(x2)))
+    y2 = min(image.height, int(np.ceil(y2)))
+
+    mask = np.zeros(
+        (image.height, image.width),
+        dtype=bool,
+    )
+    mask[y1:y2, x1:x2] = True
+
+    return mask
+
+
+@torch.no_grad()
+def segment_center_with_sam(
+    image,
+    model,
+    processor,
+    device,
+):
+    """
+    旧方式。画像中心のpositive pointからSAMの3候補を出し、
+    predicted IoU最大のmaskを返す。
+    """
+    inputs = processor(
+        images=image,
+        input_points=[[[image.width / 2.0, image.height / 2.0]]],
+        return_tensors="pt",
+    ).to(device)
+
+    outputs = model(**inputs)
+
+    masks = (
+        processor
+        .image_processor
+        .post_process_masks(
+            outputs.pred_masks.detach().cpu(),
+            inputs["original_sizes"].detach().cpu(),
+            inputs["reshaped_input_sizes"].detach().cpu(),
+        )[0]
+        .reshape(
+            -1,
+            image.height,
+            image.width,
+        )
+        .bool()
+    )
+
+    scores = (
+        outputs.iou_scores
+        .detach()
+        .cpu()
+        .reshape(-1)
+    )
+
+    best = int(
+        torch.argmax(scores).item()
+    )
+
+    mask = masks[best].numpy()
+
+    return (
+        mask,
+        float(scores[best].item()),
+    )
+
+
 @torch.no_grad()
 def segment_box_with_sam(
     image,
@@ -211,7 +334,9 @@ def segment_box_with_sam(
     device,
 ):
     """
-    Grounding DINOのbboxをSAMへ渡し、bbox内の物体全体をsegmentする。
+    Grounding DINOのbboxをSAMへ渡す。
+    3候補のうち、best scoreから0.05以内なら
+    面積が最大のmaskを優先して、細切れmaskを避ける。
     """
     inputs = processor(
         images=image,
@@ -221,7 +346,7 @@ def segment_box_with_sam(
 
     outputs = model(
         **inputs,
-        multimask_output=False,
+        multimask_output=True,
     )
 
     masks = (
@@ -229,39 +354,47 @@ def segment_box_with_sam(
         .image_processor
         .post_process_masks(
             outputs.pred_masks.detach().cpu(),
-            inputs[
-                "original_sizes"
-            ].detach().cpu(),
-            inputs[
-                "reshaped_input_sizes"
-            ].detach().cpu(),
+            inputs["original_sizes"].detach().cpu(),
+            inputs["reshaped_input_sizes"].detach().cpu(),
         )[0]
-    )
-
-    mask = (
-        masks
         .reshape(
             -1,
             image.height,
             image.width,
-        )[0]
+        )
         .bool()
-        .numpy()
     )
 
-    score = (
+    scores = (
         outputs.iou_scores
         .detach()
         .cpu()
-        .reshape(-1)[0]
-        .item()
+        .reshape(-1)
     )
+
+    best_score = float(
+        scores.max().item()
+    )
+
+    candidate_indices = [
+        index
+        for index, score in enumerate(scores.tolist())
+        if score >= best_score - 0.05
+    ]
+
+    best = max(
+        candidate_indices,
+        key=lambda index: int(masks[index].sum().item()),
+    )
+
+    mask = masks[best].numpy()
 
     return (
         mask,
-        float(score),
+        float(scores[best].item()),
         float(mask.mean()),
     )
+
 
 
 def apply_black_background(
@@ -441,8 +574,7 @@ def create_masked_images(
             )
 
             if box is None:
-                # 誤った部分マスクを作るより安全なので、
-                # detection失敗時は元画像をそのまま残す。
+                # detection失敗時は誤った部分maskを作らず元画像を残す。
                 mask = np.ones(
                     (
                         image.height,
@@ -455,21 +587,93 @@ def create_masked_images(
 
                 sam_score = float("nan")
                 area_ratio = 1.0
+                center_box_iou = float("nan")
+                mask_coverage = float("nan")
+                strategy = "keep_original"
                 fallback = "no_detection_keep_original"
                 no_detection_count += 1
 
             else:
+                # まず、動物などでうまく働いていた旧center-point maskを試す。
                 (
-                    mask,
-                    sam_score,
-                    area_ratio,
-                ) = segment_box_with_sam(
+                    center_mask,
+                    center_score,
+                ) = segment_center_with_sam(
                     image=image,
-                    box=box,
                     model=sam_model,
                     processor=sam_processor,
                     device=device,
                 )
+
+                center_box_iou = box_iou(
+                    mask_bounding_box(center_mask),
+                    box,
+                )
+
+                if (
+                    center_box_iou
+                    >= args.center_mask_box_iou
+                ):
+                    mask = center_mask
+                    sam_score = center_score
+                    area_ratio = float(mask.mean())
+                    mask_coverage = mask_box_coverage(
+                        mask,
+                        box,
+                    )
+                    strategy = "center_point"
+                    fallback = ""
+
+                else:
+                    # center-pointが棒1本など局所部分を取った場合はbbox promptへ切り替える。
+                    (
+                        mask,
+                        sam_score,
+                        area_ratio,
+                    ) = segment_box_with_sam(
+                        image=image,
+                        box=box,
+                        model=sam_model,
+                        processor=sam_processor,
+                        device=device,
+                    )
+
+                    mask_coverage = (
+                        mask_box_coverage(
+                            mask,
+                            box,
+                        )
+                    )
+
+                    strategy = "box_sam"
+                    fallback = ""
+
+                    # abacusのようにSAMがbbox内の一部分しか残さない場合は、
+                    # 物体を欠損させるよりbbox内を全て残す方を優先する。
+                    if (
+                        mask_coverage
+                        < args.min_mask_box_coverage
+                    ):
+                        mask = rectangle_mask(
+                            image,
+                            box,
+                        )
+
+                        area_ratio = float(
+                            mask.mean()
+                        )
+
+                        mask_coverage = (
+                            mask_box_coverage(
+                                mask,
+                                box,
+                            )
+                        )
+
+                        strategy = "box_rectangle"
+                        fallback = (
+                            "sparse_sam_mask_use_box"
+                        )
 
                 masked = (
                     apply_black_background(
@@ -477,8 +681,6 @@ def create_masked_images(
                         mask,
                     )
                 )
-
-                fallback = ""
 
             output_path.parent.mkdir(
                 parents=True,
@@ -532,6 +734,12 @@ def create_masked_images(
                 sam_score,
             "foreground_area_ratio":
                 area_ratio,
+            "center_mask_box_iou":
+                center_box_iou,
+            "mask_box_coverage":
+                mask_coverage,
+            "mask_strategy":
+                strategy,
             "fallback":
                 fallback,
         })
@@ -842,6 +1050,26 @@ def main():
         "--box_padding",
         type=float,
         default=0.05,
+    )
+
+    parser.add_argument(
+        "--center_mask_box_iou",
+        type=float,
+        default=0.45,
+        help=(
+            "If the old center-point SAM mask agrees with the "
+            "Grounding DINO box at least this much, reuse it."
+        ),
+    )
+
+    parser.add_argument(
+        "--min_mask_box_coverage",
+        type=float,
+        default=0.20,
+        help=(
+            "If box-prompt SAM keeps less than this fraction of "
+            "the detected box area, fall back to keeping the whole box."
+        ),
     )
 
     parser.add_argument(
