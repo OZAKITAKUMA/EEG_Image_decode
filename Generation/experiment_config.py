@@ -105,8 +105,6 @@ EXPERIMENT_PROFILES = {
     "svd_compare": [
         "image_encoder",
         "feature_transform",
-        "rsa_loss_type",
-        "rsa_weight",
         "checkpoint_criterion",
     ],
 
