@@ -275,6 +275,54 @@ def compute_adapter_loss(predicted, target):
 
     return total_loss
 
+
+def fit_global_svd_components(
+    img_features_all,
+    seed,
+    val_ratio,
+):
+    """
+    Fit one global SVD basis using only the 9/10 training image conditions.
+    The held-out validation condition is not used to estimate the basis.
+    """
+    fit_indices, _ = stratified_condition_split(
+        n_classes=1654,
+        conditions_per_class=10,
+        trials_per_condition=1,
+        val_ratio=val_ratio,
+        seed=seed,
+    )
+
+    index_tensor = torch.as_tensor(
+        fit_indices,
+        dtype=torch.long,
+    )
+
+    x_fit = img_features_all[index_tensor].float()
+    x_fit = x_fit - x_fit.mean(
+        dim=0,
+        keepdim=True,
+    )
+
+    print(
+        "[SVD weighted MSE] Fitting global SVD basis:",
+        f"shape={tuple(x_fit.shape)}",
+    )
+
+    _, singular_values, vh = torch.linalg.svd(
+        x_fit,
+        full_matrices=False,
+    )
+
+    print(
+        "[SVD weighted MSE] Basis fitted:",
+        f"components={vh.shape[0]}",
+        f"largest_singular={singular_values[0].item():.6f}",
+        f"smallest_singular={singular_values[-1].item():.6f}",
+    )
+
+    return vh.cpu()
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
@@ -347,6 +395,26 @@ def main():
     parser.add_argument('--lr_encoder', type=float, default=3e-4)
     parser.add_argument('--rsa_weight', type=float, default=0.0, help='Weight for RSA loss. 0.0 disables RSA loss.',)
     parser.add_argument('--rsa_loss_type', type=str, default='pearson', choices=['pearson', 'rdm_mse'], help='RSA loss type: pearson or rdm_mse.',)
+    parser.add_argument(
+        '--svd_mse_weighting',
+        action='store_true',
+        help=(
+            'Compute the generation MSE in the global SVD basis and '
+            'up-weight the lowest-variance principal components.'
+        ),
+    )
+    parser.add_argument(
+        '--svd_bottom_k',
+        type=int,
+        default=64,
+        help='Number of lowest-variance SVD components to emphasize.',
+    )
+    parser.add_argument(
+        '--svd_bottom_weight',
+        type=float,
+        default=4.0,
+        help='Relative MSE weight applied to the bottom SVD components.',
+    )
     parser.add_argument('--lr_prior', type=float, default=1e-3)
     parser.add_argument(
         '--checkpoint_criterion',
@@ -431,6 +499,16 @@ def main():
             "--encoder_onlyと--encoder_finetuningは同時に指定できません"
         )
 
+    if args.svd_bottom_k < 1:
+        raise ValueError(
+            "--svd_bottom_k must be >= 1"
+        )
+
+    if args.svd_bottom_weight <= 0:
+        raise ValueError(
+            "--svd_bottom_weight must be > 0"
+        )
+
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
@@ -513,6 +591,28 @@ def main():
                                                             conditions_per_class=10,
                                                             trials_per_condition=tpc, val_ratio=args.val_ratio, seed=args.seed,
     )
+
+    svd_components = None
+
+    if args.svd_mse_weighting:
+        if args.svd_bottom_k > feature_dim:
+            raise ValueError(
+                "--svd_bottom_k cannot exceed feature dimension: "
+                f"k={args.svd_bottom_k}, dim={feature_dim}"
+            )
+
+        svd_components = fit_global_svd_components(
+            img_features_all=img_features_all,
+            seed=args.seed,
+            val_ratio=args.val_ratio,
+        ).to(device)
+
+        print(
+            "[SVD weighted MSE] "
+            f"bottom_k={args.svd_bottom_k}, "
+            f"bottom_weight={args.svd_bottom_weight:g}, "
+            "weights normalized to mean=1"
+        )
 
 
     samples_per_subject = 1654 * 10 * tpc
@@ -858,6 +958,9 @@ def main():
                 loss_mode='generation', alpha=0.90,
                 rsa_weight=args.rsa_weight,
                 rsa_loss_type=args.rsa_loss_type,
+                svd_components=svd_components,
+                svd_bottom_k=args.svd_bottom_k,
+                svd_bottom_weight=args.svd_bottom_weight,
                 use_subject_id=not args.no_subject_id,
             )
 
@@ -865,6 +968,7 @@ def main():
             print(
                 "[Train loss components] "
                 f"raw: MSE={train_components['mse']:.6f}, "
+                f"UnweightedMSE={train_components['mse_unweighted']:.6f}, "
                 f"Contrastive={train_components['clip']:.6f}, "
                 f"RSA={train_components['rsa']:.6f} | "
                 f"weighted: MSE={train_components['mse_term']:.6f}, "
@@ -921,6 +1025,9 @@ def main():
             k=200, loss_mode='generation', alpha=0.99,
             rsa_weight=args.rsa_weight,
             rsa_loss_type=args.rsa_loss_type,
+            svd_components=svd_components,
+            svd_bottom_k=args.svd_bottom_k,
+            svd_bottom_weight=args.svd_bottom_weight,
             use_subject_id=not args.no_subject_id,
             accuracy_seed=(
                 args.seed
@@ -936,6 +1043,7 @@ def main():
             print(
                 "[Val loss components] "
                 f"raw: MSE={val_components['mse']:.6f}, "
+                f"UnweightedMSE={val_components['mse_unweighted']:.6f}, "
                 f"Contrastive={val_components['clip']:.6f}, "
                 f"RSA={val_components['rsa']:.6f} | "
                 f"weighted: MSE={val_components['mse_term']:.6f}, "
