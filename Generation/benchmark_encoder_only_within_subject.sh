@@ -44,6 +44,9 @@ LR_ENCODER="${LR_ENCODER:-3e-4}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
 RSA_WEIGHT="${RSA_WEIGHT:-0.0}"
 RSA_LOSS_TYPE="${RSA_LOSS_TYPE:-pearson}"
+SVD_MSE_WEIGHTING="${SVD_MSE_WEIGHTING:-false}"
+SVD_BOTTOM_K="${SVD_BOTTOM_K:-64}"
+SVD_BOTTOM_WEIGHT="${SVD_BOTTOM_WEIGHT:-4.0}"
 CHECKPOINT_CRITERION="${CHECKPOINT_CRITERION:-val_rsa_pearson}"
 METHOD="${METHOD:-baseline}"
 EXPERIMENT_TYPE="${EXPERIMENT_TYPE:-manual}"
@@ -109,6 +112,11 @@ echo "  Experiment type: ${EXPERIMENT_TYPE}"
 echo "  Avg trials:      ${AVG_SIGNAL_TRAINING}"
 echo "  RSA weight:      ${RSA_WEIGHT}"
 echo "  RSA loss type:   ${RSA_LOSS_TYPE}"
+echo "  SVD MSE weight:  ${SVD_MSE_WEIGHTING}"
+if [ "${SVD_MSE_WEIGHTING}" = true ]; then
+    echo "  SVD bottom K:    ${SVD_BOTTOM_K}"
+    echo "  SVD bottom wt:   ${SVD_BOTTOM_WEIGHT}"
+fi
 echo "  Adapter:         false"
 echo "  Checkpoint:      ${CHECKPOINT_CRITERION}"
 echo "  Diffusion Prior: disabled"
@@ -173,6 +181,14 @@ for SUBJECT in ${SUBJECTS}; do
             --image_encoder "${IMAGE_ENCODER}"
             --feature_space "${FEATURE_SPACE}"
         )
+
+        if [ "${SVD_MSE_WEIGHTING}" = true ]; then
+            TRAIN_CMD+=(
+                --svd_mse_weighting
+                --svd_bottom_k "${SVD_BOTTOM_K}"
+                --svd_bottom_weight "${SVD_BOTTOM_WEIGHT}"
+            )
+        fi
 
         if [ -n "${FEATURES_DIR}" ]; then
             TRAIN_CMD+=(--features_dir "${FEATURES_DIR}")
