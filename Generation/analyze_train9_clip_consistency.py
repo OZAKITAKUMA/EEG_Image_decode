@@ -906,4 +906,4 @@ if __name__ == "__main__":
     main()
 
 
-# python Generation/analyze_train9_clip_consistency.py --checkpoint /home/moepy/ozakitakuma/EEG_Image_decode_develop/Generation/models/baseline/clip/full/mse_contrastive/val_rdm_mse/encoder/sub-01/10-06_05-03/best.pth
+# python Generation/analyze_train9_clip_consistency.py --checkpoint /home/moepy/ozakitakuma/EEG_Image_decode_develop/Generation/models/baseline/clip/svd_class_remove_top_64/mse_contrastive/val_rdm_mse/encoder/sub-01/10-07_03-12/best.pth
