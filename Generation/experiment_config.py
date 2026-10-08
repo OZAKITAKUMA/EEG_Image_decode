@@ -29,6 +29,11 @@ DEFAULT_CONFIG = {
 
     "rsa_weight": 0.0,
     "rsa_loss_type": "pearson",
+
+    "svd_mse_weighting": False,
+    "svd_bottom_k": 64,
+    "svd_bottom_weight": 4.0,
+
     "checkpoint_criterion": "val_rsa_pearson",
 
     "val_ratio": 0.1,
@@ -91,6 +96,7 @@ CHECKPOINT_CRITERION_CHOICES = [
 EXPERIMENT_TYPE_CHOICES = [
     "image_encoder_compare",
     "svd_compare",
+    "svd_bottom_weight_compare",
     "loss_compare",
     "subject_compare",
 ]
@@ -105,6 +111,12 @@ EXPERIMENT_PROFILES = {
     "svd_compare": [
         "image_encoder",
         "feature_transform",
+        "checkpoint_criterion",
+    ],
+
+    "svd_bottom_weight_compare": [
+        "svd_bottom_k",
+        "svd_bottom_weight",
         "checkpoint_criterion",
     ],
 
@@ -205,6 +217,17 @@ def build_feature_filename(config):
 
 def build_loss_name(config):
     """Build a directory name representing the training loss."""
+
+    if config.get("svd_mse_weighting", False):
+        bottom_k = config["svd_bottom_k"]
+        bottom_weight = format_weight_for_path(
+            config["svd_bottom_weight"]
+        )
+        return (
+            "mse_contrastive_"
+            f"svd_bottom{bottom_k}_"
+            f"w{bottom_weight}"
+        )
 
     rsa_weight = config["rsa_weight"]
 
