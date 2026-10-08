@@ -134,6 +134,23 @@ def validate_config(config):
                 "FEATURE_SOURCE_FILESに登録されていません。"
             )
 
+    if config["svd_mse_weighting"]:
+        if config["svd_bottom_k"] < 1 or config["svd_bottom_k"] > 1024:
+            errors.append(
+                "svd_bottom_kは1以上1024以下にしてください。"
+            )
+
+        if config["svd_bottom_weight"] <= 0:
+            errors.append(
+                "svd_bottom_weightは0より大きくしてください。"
+            )
+
+        if config["image_encoder"] != "clip":
+            errors.append(
+                "SVD bottom weighting experimentは"
+                "現在CLIPのみを対象とします。"
+            )
+
     if config["rsa_weight"] < 0:
         errors.append(
             "RSA weightは0以上にしてください。"
@@ -243,6 +260,22 @@ def main():
                 config["svd_remove_count"] = None
                 config["svd_remove_start"] = None
         
+        elif question == "svd_bottom_k":
+            config["svd_mse_weighting"] = True
+            config["feature_transform"] = "full"
+            config["svd_bottom_k"] = ask_int(
+                "強調する下位SVD成分数を入力してください。",
+                config["svd_bottom_k"],
+            )
+
+        elif question == "svd_bottom_weight":
+            config["svd_mse_weighting"] = True
+            config["feature_transform"] = "full"
+            config["svd_bottom_weight"] = ask_float(
+                "下位SVD成分のMSE重みを入力してください。",
+                config["svd_bottom_weight"],
+            )
+
         elif question == "rsa_loss_type":
             config["rsa_loss_type"] = ask_choice(
                 "RSA loss typeを選択してください。",
@@ -423,6 +456,15 @@ def main():
 
         "RSA_WEIGHT": str(config["rsa_weight"]),
         "RSA_LOSS_TYPE": str(config["rsa_loss_type"]),
+
+        "SVD_MSE_WEIGHTING": str(
+            config["svd_mse_weighting"]
+        ).lower(),
+        "SVD_BOTTOM_K": str(config["svd_bottom_k"]),
+        "SVD_BOTTOM_WEIGHT": str(
+            config["svd_bottom_weight"]
+        ),
+
         "CHECKPOINT_CRITERION": str(
             config["checkpoint_criterion"]
         ),
