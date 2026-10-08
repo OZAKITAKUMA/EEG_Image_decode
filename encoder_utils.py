@@ -161,15 +161,91 @@ def _compute_rdm_mse_loss(eeg_features, img_features):
 
     return F.mse_loss(eeg_dist, img_dist)
 
+def _compute_svd_weighted_mse(
+    eeg_features,
+    img_features,
+    svd_components,
+    svd_bottom_k=64,
+    svd_bottom_weight=1.0,
+):
+    """
+    Compute MSE in the SVD/PCA coordinate system while up-weighting
+    the lowest-variance principal directions.
+
+    The component weights are normalized to mean 1 so changing
+    svd_bottom_weight changes the relative emphasis across directions
+    without trivially scaling the overall MSE term.
+    """
+    feature_dim = eeg_features.shape[-1]
+
+    if svd_components is None:
+        return F.mse_loss(eeg_features, img_features)
+
+    if not 1 <= svd_bottom_k <= feature_dim:
+        raise ValueError(
+            f"svd_bottom_k must be in [1, {feature_dim}], "
+            f"got {svd_bottom_k}"
+        )
+
+    if svd_bottom_weight <= 0:
+        raise ValueError(
+            "svd_bottom_weight must be > 0, "
+            f"got {svd_bottom_weight}"
+        )
+
+    components = svd_components.to(
+        device=eeg_features.device,
+        dtype=eeg_features.dtype,
+    )
+
+    if tuple(components.shape) != (feature_dim, feature_dim):
+        raise ValueError(
+            "svd_components must have shape "
+            f"({feature_dim}, {feature_dim}), "
+            f"got {tuple(components.shape)}"
+        )
+
+    error = eeg_features - img_features
+    error_svd = error @ components.T
+
+    weights = torch.ones(
+        feature_dim,
+        device=error_svd.device,
+        dtype=error_svd.dtype,
+    )
+    weights[-svd_bottom_k:] = svd_bottom_weight
+    weights = weights / weights.mean()
+
+    return (error_svd.pow(2) * weights).mean()
+
+
 def _compute_loss(eeg_features, img_features, logit_scale, loss_func,
                   loss_mode: str, alpha: float,
                   rsa_weight: float = 0.0,
                   rsa_loss_type: str = 'pearson',
+                  svd_components=None,
+                  svd_bottom_k: int = 64,
+                  svd_bottom_weight: float = 1.0,
                   return_components: bool = False,
                   text_features=None):
     """Return scalar loss for one batch."""
     if loss_mode == 'generation':
-        mse = nn.functional.mse_loss(eeg_features, img_features)
+        mse_unweighted = nn.functional.mse_loss(
+            eeg_features,
+            img_features,
+        )
+
+        if svd_components is not None:
+            mse = _compute_svd_weighted_mse(
+                eeg_features,
+                img_features,
+                svd_components=svd_components,
+                svd_bottom_k=svd_bottom_k,
+                svd_bottom_weight=svd_bottom_weight,
+            )
+        else:
+            mse = mse_unweighted
+
         eeg_n = F.normalize(eeg_features, dim=-1)
         img_n = F.normalize(img_features, dim=-1)
         clip_loss = loss_func(eeg_n, img_n, logit_scale)
@@ -199,6 +275,7 @@ def _compute_loss(eeg_features, img_features, logit_scale, loss_func,
         if return_components:
             components = {
                 "mse": mse.detach(),
+                "mse_unweighted": mse_unweighted.detach(),
                 "clip": clip_loss.detach(),
                 "rsa": rsa_loss.detach(),
                 "mse_term": mse_term.detach(),
@@ -284,6 +361,9 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
                         alpha: float,
                         rsa_weight: float = 0.0,
                         rsa_loss_type: str = 'pearson',
+                        svd_components=None,
+                        svd_bottom_k: int = 64,
+                        svd_bottom_weight: float = 1.0,
                         use_subject_id: bool = True,
                         text_features_all=None):
     """
@@ -320,6 +400,7 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
     if loss_mode == 'generation':
         component_sums = {
             "mse": 0.0,
+            "mse_unweighted": 0.0,
             "clip": 0.0,
             "rsa": 0.0,
             "mse_term": 0.0,
@@ -352,6 +433,9 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
             model.loss_func, loss_mode, alpha,
             rsa_weight=rsa_weight,
             rsa_loss_type=rsa_loss_type,
+            svd_components=svd_components,
+            svd_bottom_k=svd_bottom_k,
+            svd_bottom_weight=svd_bottom_weight,
             return_components=(loss_mode == 'generation'),
             text_features=txt_feats)
 
@@ -400,6 +484,9 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
                      alpha: float,
                      rsa_weight: float = 0.0,
                      rsa_loss_type: str = "pearson",
+                     svd_components=None,
+                     svd_bottom_k: int = 64,
+                     svd_bottom_weight: float = 1.0,
                      use_subject_id: bool = True,
                      accuracy_seed=None,
                      text_features_all=None):
@@ -431,6 +518,7 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
     if loss_mode == 'generation':
         component_sums = {
             "mse": 0.0,
+            "mse_unweighted": 0.0,
             "clip": 0.0,
             "rsa": 0.0,
             "mse_term": 0.0,
@@ -470,6 +558,9 @@ def evaluate_encoder(sub, model, loader, device, img_features_all, *,
             model.loss_func, loss_mode, alpha,
             rsa_weight=rsa_weight,
             rsa_loss_type=rsa_loss_type,
+            svd_components=svd_components,
+            svd_bottom_k=svd_bottom_k,
+            svd_bottom_weight=svd_bottom_weight,
             return_components=(loss_mode == 'generation'),
             text_features=txt_feats)
 
