@@ -86,6 +86,7 @@ Generation/LAVIS/
 Generation/diffusers/
 Generation/THINGS/
 Generation/vision_models/
+Generation/comparison_grids/
 
 # ── Retrieval module ──────────────────────────────────────────────────────────
 Retrieval/models/
