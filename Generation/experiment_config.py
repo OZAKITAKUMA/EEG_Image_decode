@@ -63,6 +63,7 @@ SVD_COMPONENT_MODE_CHOICES = [
     "remove_middle",
     "remove_bottom",
     "remove_range",
+    "whiten",
 ]
 
 FEATURE_SOURCE_FILES = {
@@ -139,6 +140,9 @@ def build_svd_cache_tag(config):
 
         return f"svd_{centering}_keep{rank}"
 
+    if mode == "whiten":
+        return f"svd_{centering}_whiten"
+
     remove_count = config["svd_remove_count"]
 
     if mode == "remove_range":
@@ -168,6 +172,9 @@ def build_svd_path_name(config):
             return f"svd_{rank}"
 
         return f"svd_{centering}_keep_{rank}"
+
+    if mode == "whiten":
+        return f"svd_{centering}_whiten"
 
     remove_count = config["svd_remove_count"]
 

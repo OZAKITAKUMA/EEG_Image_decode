@@ -97,7 +97,8 @@ def validate_config(config):
                 errors.append(
                     "SVD rankは1以上1024以下にしてください。"
                 )
-        else:
+
+        elif mode != "whiten":
             remove_count = config["svd_remove_count"]
 
             if remove_count is None:
@@ -223,6 +224,11 @@ def main():
                     config["svd_remove_count"] = None
                     config["svd_remove_start"] = None
 
+                elif config["svd_component_mode"] == "whiten":
+                    config["svd_rank"] = None
+                    config["svd_remove_count"] = None
+                    config["svd_remove_start"] = None
+
                 else:
                     config["svd_rank"] = None
                     config["svd_remove_count"] = ask_int(
@@ -340,6 +346,8 @@ def main():
         print("実験をキャンセルしました。")
         return
 
+    whitening_basis_path = None
+
     if config["feature_transform"] == "svd":
         repo_root = os.path.dirname(
             os.path.dirname(os.path.abspath(__file__))
@@ -355,13 +363,39 @@ def main():
             raise FileNotFoundError(
                 f"Source feature cache not found: {source_features_path}"
             )
-        
-        if not os.path.exists(config["train_features_path"]):
-            
-            print(
-                "\nSVD feature cacheが見つからないため生成します:"
+
+        if config["svd_component_mode"] == "whiten":
+            source_root, source_ext = os.path.splitext(
+                source_features_path
             )
-            print(f"  {config['train_features_path']}")
+
+            whitening_basis_path = (
+                f"{source_root}_svd_"
+                f"{config['svd_centering']}_basis"
+                f"{source_ext}"
+            )
+
+        need_svd_cache = not os.path.exists(
+            config["train_features_path"]
+        )
+
+        need_whitening_basis = (
+            config["svd_component_mode"] == "whiten"
+            and not os.path.exists(whitening_basis_path)
+        )
+
+        if need_svd_cache or need_whitening_basis:
+            print(
+                "\nSVD feature cache / basisを生成します:"
+            )
+            print(
+                f"  feature: {config['train_features_path']}"
+            )
+
+            if whitening_basis_path is not None:
+                print(
+                    f"  basis  : {whitening_basis_path}"
+                )
 
             svd_command = [
                 "python",
@@ -388,6 +422,12 @@ def main():
                     "--rank",
                     str(config["svd_rank"]),
                 ])
+
+            elif config["svd_component_mode"] == "whiten":
+                svd_command.append(
+                    "--save_basis"
+                )
+
             else:
                 svd_command.extend([
                     "--remove_count",
@@ -404,7 +444,7 @@ def main():
                 svd_command,
                 check=True,
             )
-
+            
     print("\n実験を開始します。")
 
     env = os.environ.copy()

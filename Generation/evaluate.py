@@ -69,6 +69,36 @@ def extract_eeg_features(sub, eeg_model, dataloader, device, use_subject_id=True
             features_list.append(eeg_features.detach().cpu())
     return torch.cat(features_list, dim=0)
 
+def inverse_whitening(
+    whitened_features,
+    basis_path,
+):
+    basis = torch.load(
+        basis_path,
+        map_location="cpu",
+        weights_only=False,
+    )
+
+    centers = basis["centers"].float()
+    singular_values = basis["singular_values"].float()
+    vh = basis["vh"].float()
+
+    n_fit_samples = len(basis["train_indices"])
+
+    whitening_std = (
+        singular_values
+        / (n_fit_samples - 1) ** 0.5
+    ).clamp_min(1e-6)
+
+    x = whitened_features.float().cpu()
+
+    restored = (
+        (x * whitening_std) @ vh
+        + centers
+    )
+
+    return restored
+
 def report_embedding_cosine(
     eeg_features,
     prior_features,
@@ -479,6 +509,15 @@ def main():
     parser.add_argument("--retrieval_only", action="store_true", help="画像検索だけ実行し、Priorと画像生成を行わない",)
     parser.add_argument("--feature_space", choices=["clip", "cls"], default="cls", 
                         help=("Feature space used by the trained encoder and prior"),)
+    parser.add_argument(
+        "--whitening_basis_path",
+        type=str,
+        default=None,
+        help=(
+            "SVD whiteningを使用したモデルの評価時に、"
+            "inverse whitening用basisファイルを指定する"
+        ),
+    )
     parser.add_argument("--adapter_path", type=str, default=None,)
     parser.add_argument("--use_adapter", action="store_true",)
     parser.add_argument("--feature_save", action="store_true",)
@@ -577,6 +616,23 @@ def main():
         # --- Extract EEG features ---
         print("Extracting EEG features from test set...")
         eeg_features_native = extract_eeg_features(sub, eeg_model, test_loader, device, use_subject_id=not args.no_subject_id).float()
+        
+        if args.whitening_basis_path is not None:
+            print(
+                "Inverse whitening EEG features using:",
+                args.whitening_basis_path,
+            )
+
+            eeg_features_native = inverse_whitening(
+                eeg_features_native,
+                args.whitening_basis_path,
+            )
+
+            print(
+                "EEG features after inverse whitening:",
+                eeg_features_native.shape,
+            )
+        
         img_features_native = (
             test_dataset.img_features.float()
         )

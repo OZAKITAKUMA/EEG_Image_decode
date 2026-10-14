@@ -30,6 +30,7 @@ SDXL_MODEL_PATH="${SDXL_MODEL_PATH:-stabilityai/sdxl-turbo}"
 IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
 FEATURES_DIR="${FEATURES_DIR:-}"
 TRAIN_FEATURES_PATH="${TRAIN_FEATURES_PATH:-}"
+WHITENING_BASIS_PATH="${WHITENING_BASIS_PATH:-}"
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
 #==============================================================================
@@ -102,6 +103,11 @@ if [ -n "${TRAIN_FEATURES_PATH}" ]; then
     echo "  Train features:  ${TRAIN_FEATURES_PATH}"
 else
     echo "  Train features:  default"
+fi
+if [ -n "${WHITENING_BASIS_PATH}" ]; then
+    echo "  Whitening basis: ${WHITENING_BASIS_PATH}"
+else
+    echo "  Whitening basis: disabled"
 fi
 echo "  Image encoder:   ${IMAGE_ENCODER}"
 echo "  Method:          ${METHOD}"
@@ -231,6 +237,13 @@ for SUBJECT in ${SUBJECTS}; do
 
     if [ -n "${FEATURES_DIR}" ]; then
         EVAL_CMD+=(--features_dir "${FEATURES_DIR}")
+    fi
+    if [ -n "${WHITENING_BASIS_PATH}" ]; then
+        if [ ! -f "${WHITENING_BASIS_PATH}" ]; then
+            echo "[WARN] Whitening basis not found: ${WHITENING_BASIS_PATH}. Skipping ${SUBJECT}."
+            continue
+        fi
+        EVAL_CMD+=(--whitening_basis_path "${WHITENING_BASIS_PATH}")
     fi
     if [ -n "${SDXL_MODEL_PATH}" ]; then
         EVAL_CMD+=(--sdxl_model_path "${SDXL_MODEL_PATH}")

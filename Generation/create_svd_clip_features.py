@@ -60,6 +60,7 @@ COMPONENT_MODE_CHOICES = [
     "remove_middle",
     "remove_bottom",
     "remove_range",
+    "whiten",
 ]
 
 
@@ -239,6 +240,22 @@ def fit_centered_svd(
         vh.cpu(),
     )
 
+def compute_whitening_std(
+    singular_values,
+    n_fit_samples,
+    eps=1e-6,
+):
+    if n_fit_samples <= 1:
+        raise ValueError(
+            f"n_fit_samples must be > 1, got {n_fit_samples}"
+        )
+
+    std = (
+        singular_values.float()
+        / (n_fit_samples - 1) ** 0.5
+    )
+
+    return std.clamp_min(eps)
 
 def component_keep_mask(
     feature_dim,
@@ -251,6 +268,9 @@ def component_keep_mask(
         feature_dim,
         dtype=torch.bool,
     )
+
+    if component_mode == "whiten":
+        return keep_mask, None, None
 
     if component_mode == "keep_top_rank":
         if rank is None or not 1 <= rank <= feature_dim:
@@ -391,6 +411,60 @@ def reconstruct_features(
         dtype=original_dtype
     )
 
+def whiten_features(
+    img_features,
+    centers,
+    centering,
+    vh,
+    whitening_std,
+    chunk_size,
+):
+    original_dtype = img_features.dtype
+    x = img_features.float()
+
+    components = vh.float()
+    whitening_std = whitening_std.float()
+
+    whitened = torch.empty_like(
+        x,
+        dtype=torch.float32,
+    )
+
+    for start in range(
+        0,
+        x.shape[0],
+        chunk_size,
+    ):
+        end = min(
+            start + chunk_size,
+            x.shape[0],
+        )
+
+        row_centers = center_for_rows(
+            centers=centers,
+            centering=centering,
+            start=start,
+            end=end,
+        ).float()
+
+        centered = (
+            x[start:end]
+            - row_centers
+        )
+
+        coefficients = (
+            centered
+            @ components.T
+        )
+
+        whitened[start:end] = (
+            coefficients
+            / whitening_std
+        )
+
+    return whitened.to(
+        dtype=original_dtype
+    )
 
 def kept_variance_ratio(
     singular_values,
@@ -464,6 +538,9 @@ def build_default_output_path(
         else:
             suffix = f"_svd_{centering}_keep{rank}"
 
+    elif component_mode == "whiten":
+        suffix = f"_svd_{centering}_whiten"
+    
     elif component_mode == "remove_range":
         end = remove_start + remove_count - 1
         suffix = (
@@ -511,37 +588,73 @@ def run_one_transform(
         remove_start=args.remove_start,
     )
 
-    ratio = kept_variance_ratio(
-        singular_values,
-        keep_mask,
-    )
+    if args.component_mode == "whiten":
+        train_indices, _ = compute_train_fit_indices(
+            seed=args.seed,
+            val_ratio=args.val_ratio,
+        )
 
-    print("")
-    print("=" * 70)
-    print(
-        "Transform:",
-        f"centering={args.centering}",
-        f"mode={args.component_mode}",
-    )
-    print(
-        "Kept components:",
-        int(keep_mask.sum().item()),
-        "/",
-        feature_dim,
-    )
-    print(
-        "Kept training variance:",
-        f"{ratio * 100.0:.6f}%",
-    )
+        whitening_std = compute_whitening_std(
+            singular_values,
+            n_fit_samples=len(train_indices),
+        )
 
-    reconstructed = reconstruct_features(
-        train_features,
-        centers=centers,
-        centering=args.centering,
-        vh=vh,
-        keep_mask=keep_mask,
-        chunk_size=args.chunk_size,
-    )
+        ratio = 1.0
+
+        print("")
+        print("=" * 70)
+        print(
+            "Transform:",
+            f"centering={args.centering}",
+            "mode=whiten",
+        )
+        print(
+            "Whitening all components:",
+            feature_dim,
+        )
+
+        reconstructed = whiten_features(
+            train_features,
+            centers=centers,
+            centering=args.centering,
+            vh=vh,
+            whitening_std=whitening_std,
+            chunk_size=args.chunk_size,
+        )
+
+    else:
+        ratio = kept_variance_ratio(
+            singular_values,
+            keep_mask,
+        )
+
+        print("")
+        print("=" * 70)
+        print(
+            "Transform:",
+            f"centering={args.centering}",
+            f"mode={args.component_mode}",
+        )
+        print(
+            "Kept components:",
+            int(keep_mask.sum().item()),
+            "/",
+            feature_dim,
+        )
+        print(
+            "Kept training variance:",
+            f"{ratio * 100.0:.6f}%",
+        )
+
+        reconstructed = reconstruct_features(
+            train_features,
+            centers=centers,
+            centering=args.centering,
+            vh=vh,
+            keep_mask=keep_mask,
+            chunk_size=args.chunk_size,
+        )
+
 
     if args.output_path is not None:
         output_path = Path(
@@ -759,7 +872,7 @@ def main():
         device=torch.device(args.device),
     )
 
-    if args.save_basis:
+    if args.save_basis or args.component_mode == "whiten":
         source = Path(
             args.train_features_path
         )
