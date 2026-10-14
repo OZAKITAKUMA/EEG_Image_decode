@@ -8,6 +8,10 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from PIL import Image, ImageDraw, ImageFont
 
+
+import sys
+
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from eegdatasets import EEGDataset, get_image_encoder_feature_dim
 from models.atms import ATMS, extract_id_from_string
 
