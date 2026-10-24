@@ -39,7 +39,12 @@ parser = argparse.ArgumentParser()
 parser.add_argument('--sub', default=10, type=int)
 parser.add_argument('--n_ses', default=4, type=int)
 parser.add_argument('--sfreq', default=250, type=int)
-parser.add_argument('--mvnn_dim', default='epochs', type=str)
+parser.add_argument(
+    '--mvnn_dim',
+    default='epochs',
+    type=str,
+    choices=['none', 'epochs', 'time']
+)
 parser.add_argument('--project_dir', default='/home/Data/Things-EEG2/', type=str)
 args = parser.parse_args()
 
@@ -68,7 +73,15 @@ epoched_train, img_conditions_train, _, _ = epoching(args, 'training', seed)
 # Multivariate Noise Normalization
 # =============================================================================
 # MVNN is applied independently to the data of each session.
-whitened_test, whitened_train = mvnn(args, epoched_test, epoched_train)
+
+if args.mvnn_dim == 'none':
+    whitened_test = epoched_test
+    whitened_train = epoched_train
+else:
+    whitened_test, whitened_train = mvnn(
+        args, epoched_test, epoched_train
+    )
+
 del epoched_test, epoched_train
 
 

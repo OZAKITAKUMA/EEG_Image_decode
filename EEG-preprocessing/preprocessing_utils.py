@@ -245,8 +245,13 @@ def save_prepr(args, whitened_test, whitened_train, img_conditions_train,
 	}
 	del merged_test
 	# Saving directories
-	save_dir = os.path.join(args.project_dir,
-		'Preprocessed_data_250Hz', 'sub-'+format(args.sub,'02'))
+	# Saving directories
+	save_dir = os.path.join(
+		args.project_dir,
+		'Preprocessed_data_250Hz_ablation',
+		f'mvnn_{args.mvnn_dim}',
+		'sub-' + format(args.sub, '02')
+	)
 	file_name_test = 'preprocessed_eeg_test.npy'
 	file_name_train = 'preprocessed_eeg_training.npy'
 	# Create the directory if not existing and save the data
