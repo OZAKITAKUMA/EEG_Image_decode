@@ -270,6 +270,31 @@ class EEGDataset(Dataset):
 
         self.data, self.labels, self.text, self.img = self._load_eeg_and_images()
         self.data = self._extract_time_window(self.data, time_window)
+
+        # EEG time-window ablation (250 Hz)
+        window_str = os.environ.get("EEG_WINDOW_MS")
+
+        if window_str is not None:
+            window_ms = int(window_str)
+
+            if window_ms not in (250, 500, 1000):
+                raise ValueError(
+                    "EEG_WINDOW_MS must be 250, 500, or 1000"
+                )
+
+            if self.data.shape[-1] != 250:
+                raise ValueError(
+                    f"Expected 250 time steps, got {self.data.shape[-1]}"
+                )
+
+            keep_steps = (window_ms + 3) // 4
+
+            self.data[..., keep_steps:] = 0
+
+            print(
+                f"[EEG WINDOW] {window_ms}ms "
+                f"({keep_steps}/250 time steps)"
+            )
         
         self.visual_projection = None
         self.feature_metadata = None
