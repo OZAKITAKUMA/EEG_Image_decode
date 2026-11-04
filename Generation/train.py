@@ -750,10 +750,19 @@ def main():
     eeg_model.to(device)
     deep_cca_module = None
     if args.deep_cca_weight > 0:
-        deep_cca_module = DeepCCALoss(
-            input_dim=feature_dim,
-            cca_dim=args.deep_cca_dim,
-        ).to(device)
+        # Keep baseline DataLoader shuffle / later random draws unchanged:
+        # initializing the auxiliary heads must not consume the global RNG.
+        cpu_rng = torch.random.get_rng_state()
+        cuda_rng = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+        try:
+            deep_cca_module = DeepCCALoss(
+                input_dim=feature_dim,
+                cca_dim=args.deep_cca_dim,
+            ).to(device)
+        finally:
+            torch.random.set_rng_state(cpu_rng)
+            if cuda_rng is not None:
+                torch.cuda.set_rng_state_all(cuda_rng)
 
     encoder_optimizer = AdamW(
         list(eeg_model.parameters())
