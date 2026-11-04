@@ -39,6 +39,7 @@ from eegdatasets import (
 from diffusion_prior import DiffusionPriorUNet, EmbeddingDataset, Pipe
 from models.atms import ATMS, extract_id_from_string
 from models.eeg_clip_adapter import EEGCLIPAdapter
+from deep_cca_loss import DeepCCALoss
 
 # Shared encoder training utilities (generation loss mode: MSE + CLIP)
 from encoder_utils import (
@@ -415,6 +416,14 @@ def main():
         default=4.0,
         help='Relative MSE weight applied to the bottom SVD components.',
     )
+    parser.add_argument(
+        '--deep_cca_weight', type=float, default=0.0,
+        help='Auxiliary Deep CCA loss weight; 0 disables Deep CCA (baseline).',
+    )
+    parser.add_argument(
+        '--deep_cca_dim', type=int, default=16,
+        help='Shared canonical dimension for the two Deep CCA training heads.',
+    )
     parser.add_argument('--lr_prior', type=float, default=1e-3)
     parser.add_argument(
         '--checkpoint_criterion',
@@ -498,6 +507,15 @@ def main():
         raise ValueError(
             "--encoder_onlyと--encoder_finetuningは同時に指定できません"
         )
+
+    if args.deep_cca_weight < 0:
+        raise ValueError("--deep_cca_weight must be >= 0")
+    if args.deep_cca_weight > 0 and not args.encoder_only:
+        raise ValueError("Deep CCA experiment requires --encoder_only")
+    if args.deep_cca_weight > 0 and args.feature_space != "clip":
+        raise ValueError("Deep CCA experiment requires --feature_space clip")
+    if args.deep_cca_weight > 0 and not 1 <= args.deep_cca_dim < args.batch_size:
+        raise ValueError("Deep CCA dimension must be in [1, batch_size - 1]")
 
     if args.svd_bottom_k < 1:
         raise ValueError(
@@ -700,6 +718,9 @@ def main():
             )
     print(f"  Feature dim:       {feature_dim}")
     print(f"  RSA loss weight:   {args.rsa_weight}")
+    print(f"  Deep CCA weight:   {args.deep_cca_weight}")
+    if args.deep_cca_weight > 0:
+        print(f"  Deep CCA dim:      {args.deep_cca_dim}")
     print(f"  RSA loss type:     {args.rsa_loss_type}")
     print(f"  Checkpoint criterion: {args.checkpoint_criterion}")
     print(f"  Target subject:    {sub}")
@@ -727,7 +748,18 @@ def main():
     # ── Models ───────────────────────────────────────────────────────────
     eeg_model = ATMS(outputs_dim=feature_dim)
     eeg_model.to(device)
-    encoder_optimizer = AdamW(eeg_model.parameters(), lr=args.lr_encoder)
+    deep_cca_module = None
+    if args.deep_cca_weight > 0:
+        deep_cca_module = DeepCCALoss(
+            input_dim=feature_dim,
+            cca_dim=args.deep_cca_dim,
+        ).to(device)
+
+    encoder_optimizer = AdamW(
+        list(eeg_model.parameters())
+        + (list(deep_cca_module.parameters()) if deep_cca_module is not None else []),
+        lr=args.lr_encoder,
+    )
 
     adapter = None
 
@@ -962,6 +994,8 @@ def main():
                 svd_bottom_k=args.svd_bottom_k,
                 svd_bottom_weight=args.svd_bottom_weight,
                 use_subject_id=not args.no_subject_id,
+                deep_cca_module=deep_cca_module,
+                deep_cca_weight=args.deep_cca_weight,
             )
 
         if train_components is not None:
@@ -1160,6 +1194,11 @@ def main():
                         "best.pth",
                     ),
                 )
+                if deep_cca_module is not None:
+                    torch.save(
+                        deep_cca_module.state_dict(),
+                        os.path.join(encoder_save_dir, "best_deep_cca.pth"),
+                    )
 
                 print(
                     f"  ★ New best encoder: "
