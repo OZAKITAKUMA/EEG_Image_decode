@@ -365,7 +365,9 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
                         svd_bottom_k: int = 64,
                         svd_bottom_weight: float = 1.0,
                         use_subject_id: bool = True,
-                        text_features_all=None):
+                        text_features_all=None,
+                        deep_cca_module=None,
+                        deep_cca_weight: float = 0.0):
     """
     Train the ATMS encoder for one epoch.
 
@@ -388,6 +390,12 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
     accuracy : float  (top-1 k-way accuracy against full training feature bank)
     """
     model.train()
+    if deep_cca_module is not None:
+        if loss_mode != 'generation':
+            raise ValueError("Deep CCA is only supported for generation training")
+        if deep_cca_weight <= 0:
+            raise ValueError("deep_cca_weight must be positive when Deep CCA is enabled")
+        deep_cca_module.train()
     img_pool = img_features_all.to(device).float()
     # In generation mode the pool is every-10th sample (one per class)
     # if loss_mode == 'generation':
@@ -407,6 +415,9 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
             "clip_term": 0.0,
             "rsa_term": 0.0,
         }
+        if deep_cca_module is not None:
+            component_sums["dcca"] = 0.0
+            component_sums["dcca_term"] = 0.0
     correct = 0
     total = 0
 
@@ -445,6 +456,15 @@ def train_encoder_epoch(sub, model, loader, optimizer, device,
             loss = loss_output
             components = None
 
+        if deep_cca_module is not None:
+            dcca = deep_cca_module(eeg_features, img_feats)
+            dcca_term = deep_cca_weight * dcca
+            loss = loss + dcca_term
+            components["dcca"] = dcca.detach()
+            components["dcca_term"] = dcca_term.detach()
+
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f"Non-finite training loss at batch {batch_idx}")
         loss.backward()
         optimizer.step()
         total_loss += loss.item()
