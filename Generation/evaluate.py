@@ -482,6 +482,12 @@ def main():
     parser.add_argument("--adapter_path", type=str, default=None,)
     parser.add_argument("--use_adapter", action="store_true",)
     parser.add_argument("--feature_save", action="store_true",)
+    parser.add_argument(
+        "--pca_train_features_path",
+        type=str,
+        default=None,
+        help="PCA1024からCLIP空間へ戻すための学習済みPCA特徴ファイル",
+    )
     args = parser.parse_args()
 
     if args.use_adapter:
@@ -604,14 +610,87 @@ def main():
             )
 
         else:
-            # 従来の固定visual.projを使用
-            encoder_generation_features = (
-                eeg_features_native
-            )
+            # PCA1024から元のCLIP1024空間へ変換
+            if args.pca_train_features_path is not None:
 
-            encoder_generation_projection = (
-                clip_projection
-            )
+                if args.feature_space != "clip":
+                    raise ValueError(
+                        "PCA1024変換には--feature_space clipが必要です"
+                    )
+
+                # Train画像から求めたPCA平均・基底
+                pca_data = torch.load(
+                    args.pca_train_features_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+
+                pca_mean = pca_data["pca_mean"].float()
+                pca_components = pca_data["pca_components"].float()
+
+                # CLIPの固定Projection行列を読み込む
+                features_dir = (
+                    args.features_dir
+                    if args.features_dir is not None
+                    else os.path.join(
+                        os.path.dirname(
+                            os.path.dirname(os.path.abspath(__file__))
+                        ),
+                        "features",
+                    )
+                )
+
+                preprojection_path = os.path.join(
+                    features_dir,
+                    "ViT-H-14_preprojection_features_test.pt",
+                )
+
+                preprojection_data = torch.load(
+                    preprojection_path,
+                    map_location="cpu",
+                    weights_only=False,
+                )
+
+                W = preprojection_data["visual_projection"].float()
+
+                # Shapeを確認
+                assert pca_mean.shape == (1, 1280)
+                assert pca_components.shape == (1280, 1024)
+                assert W.shape == (1280, 1024)
+                assert eeg_features_native.shape[-1] == 1024
+
+                # PCA1024 → 近似1280次元
+                reconstructed_r = (
+                    eeg_features_native.float()
+                    @ pca_components.T
+                    + pca_mean
+                )
+
+                # 近似1280次元 → 元のCLIP1024
+                encoder_generation_features = (
+                    reconstructed_r @ W
+                )
+
+                # すでにCLIP1024なので再変換しない
+                encoder_generation_projection = torch.eye(
+                    1024,
+                    dtype=torch.float32,
+                )
+
+                print(
+                    "[PCA1024 -> CLIP1024]",
+                    encoder_generation_features.shape,
+                )
+
+            else:
+                # 従来の固定visual.projを使用
+                encoder_generation_features = (
+                    eeg_features_native
+                )
+
+                encoder_generation_projection = (
+                    clip_projection
+                )
 
         # Prior側はAdapterを通さず、CLS 1280次元のまま
         eeg_features_test = eeg_features_native
