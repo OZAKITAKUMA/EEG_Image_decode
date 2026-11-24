@@ -29,30 +29,40 @@ IMG_DIR_TEST="${IMG_DIR_TEST:-/home/moepy/ozakitakuma/data_image/test_images}"
 SDXL_MODEL_PATH="${SDXL_MODEL_PATH:-stabilityai/sdxl-turbo}"
 IP_ADAPTER_PATH="${IP_ADAPTER_PATH:-h94/IP-Adapter}"
 FEATURES_DIR="${FEATURES_DIR:-}"
+
 TRAIN_FEATURES_PATH="${TRAIN_FEATURES_PATH:-}"
+TEST_FEATURES_PATH="${TEST_FEATURES_PATH:-}"
+PCA_TRAIN_FEATURES_PATH="${PCA_TRAIN_FEATURES_PATH:-}"
+
 VISION_MODELS_DIR="${VISION_MODELS_DIR:-./vision_models}"
 
 #==============================================================================
 # Experiment settings
 #==============================================================================
+
 SUBJECTS="${SUBJECTS:-sub-01 sub-02 sub-03 sub-04 sub-05 sub-06 sub-07 sub-08 sub-09 sub-10}"
 RESUME="${RESUME:-}"
 
 ENCODER_EPOCHS="${ENCODER_EPOCHS:-100}"
 BATCH_SIZE="${BATCH_SIZE:-64}"
 LR_ENCODER="${LR_ENCODER:-3e-4}"
+
 SAVE_INTERVAL="${SAVE_INTERVAL:-10}"
+PATIENCE="${PATIENCE:-50}"
+
 RSA_WEIGHT="${RSA_WEIGHT:-0.0}"
 RSA_LOSS_TYPE="${RSA_LOSS_TYPE:-pearson}"
+
 SVD_MSE_WEIGHTING="${SVD_MSE_WEIGHTING:-false}"
 SVD_BOTTOM_K="${SVD_BOTTOM_K:-64}"
 SVD_BOTTOM_WEIGHT="${SVD_BOTTOM_WEIGHT:-4.0}"
+
 CHECKPOINT_CRITERION="${CHECKPOINT_CRITERION:-val_rsa_pearson}"
+
 METHOD="${METHOD:-baseline}"
 EXPERIMENT_TYPE="${EXPERIMENT_TYPE:-manual}"
-VAL_RATIO="${VAL_RATIO:-0.1}"
 
-PATIENCE="${PATIENCE:-50}"
+VAL_RATIO="${VAL_RATIO:-0.1}"
 AVG_SIGNAL_TRAINING="${AVG_SIGNAL_TRAINING:-true}"
 
 # Image encoder used for teacher image features.
@@ -73,13 +83,27 @@ if [ "${IMAGE_ENCODER}" != "clip" ]; then
     FEATURE_SPACE="clip"
 fi
 
+# Select training and test image features from METHOD by default.
+# Override any path above when running a custom experiment.
+if [ "${IMAGE_ENCODER}" = "clip" ]; then
+    if [ "${METHOD}" = "pca1024" ]; then
+        TRAIN_FEATURES_PATH="${TRAIN_FEATURES_PATH:-../features/ViT-H-14_pca1024_features_train.pt}"
+        TEST_FEATURES_PATH="${TEST_FEATURES_PATH:-../features/ViT-H-14_pca1024_features_test.pt}"
+        PCA_TRAIN_FEATURES_PATH="${PCA_TRAIN_FEATURES_PATH:-../features/ViT-H-14_pca1024_features_train.pt}"
+    elif [ "${METHOD}" = "baseline" ]; then
+        TRAIN_FEATURES_PATH="${TRAIN_FEATURES_PATH:-../features/ViT-H-14_features_train.pt}"
+        TEST_FEATURES_PATH="${TEST_FEATURES_PATH:-../features/ViT-H-14_features_test.pt}"
+    fi
+fi
+
 # Keep results from different image encoders separate.
-MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only/${IMAGE_ENCODER}}"
-OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/${IMAGE_ENCODER}}"
+MODEL_SAVE_DIR="${MODEL_SAVE_DIR:-./models/benchmark_encoder_only/${IMAGE_ENCODER}/${METHOD}}"
+OUTPUT_DIR="${OUTPUT_DIR:-./outputs/benchmark_encoder_only/${IMAGE_ENCODER}/${METHOD}}"
 
 NUM_GEN_PER_CLASS="${NUM_GEN_PER_CLASS:-1}"
 SDXL_INFERENCE_STEPS="${SDXL_INFERENCE_STEPS:-4}"
 GEN_BATCH_SIZE="${GEN_BATCH_SIZE:-8}"
+RETRIEVAL_ONLY="${RETRIEVAL_ONLY:-false}"
 
 GPU="${GPU:-cuda:0}"
 SEED="${SEED:-42}"
@@ -195,6 +219,10 @@ for SUBJECT in ${SUBJECTS}; do
         fi
 
         if [ -n "${TRAIN_FEATURES_PATH}" ]; then
+            if [ ! -f "${TRAIN_FEATURES_PATH}" ]; then
+                echo "[ERROR] Train features not found: ${TRAIN_FEATURES_PATH}"
+                continue
+            fi
             TRAIN_CMD+=(--features_path "${TRAIN_FEATURES_PATH}")
         fi
 
@@ -226,6 +254,7 @@ for SUBJECT in ${SUBJECTS}; do
         echo "[WARN] Encoder checkpoint missing: ${ENCODER_PATH}"
         continue
     fi
+    mkdir -p "${EVAL_OUTPUT_DIR}"
 
     EVAL_CMD=(
         python -u evaluate.py
@@ -248,14 +277,38 @@ for SUBJECT in ${SUBJECTS}; do
     if [ -n "${FEATURES_DIR}" ]; then
         EVAL_CMD+=(--features_dir "${FEATURES_DIR}")
     fi
+    if [ -n "${TEST_FEATURES_PATH}" ]; then
+        if [ ! -f "${TEST_FEATURES_PATH}" ]; then
+            echo "[ERROR] Test features not found: ${TEST_FEATURES_PATH}"
+            continue
+        fi
+
+        EVAL_CMD+=(--test_features_path "${TEST_FEATURES_PATH}")
+    fi
     if [ -n "${SDXL_MODEL_PATH}" ]; then
         EVAL_CMD+=(--sdxl_model_path "${SDXL_MODEL_PATH}")
     fi
     if [ -n "${IP_ADAPTER_PATH}" ]; then
         EVAL_CMD+=(--ip_adapter_path "${IP_ADAPTER_PATH}")
     fi
+    if [ -n "${PCA_TRAIN_FEATURES_PATH}" ]; then
+        if [ ! -f "${PCA_TRAIN_FEATURES_PATH}" ]; then
+            echo "[ERROR] PCA features not found: ${PCA_TRAIN_FEATURES_PATH}"
+            continue
+        fi
 
-    echo "  [STEP 2] Encoder-only generation and evaluation ..."
+        EVAL_CMD+=(
+            --pca_train_features_path "${PCA_TRAIN_FEATURES_PATH}"
+        )
+    fi
+    if [ "${RETRIEVAL_ONLY}" = true ]; then
+        EVAL_CMD+=(--retrieval_only)
+    fi
+    if [ "${RETRIEVAL_ONLY}" = true ]; then
+        echo "  [STEP 2] Encoder-only retrieval evaluation ..."
+    else
+        echo "  [STEP 2] Encoder-only generation and evaluation ..."
+    fi
     "${EVAL_CMD[@]}"
     EVAL_STATUS=$?
 
@@ -264,9 +317,14 @@ for SUBJECT in ${SUBJECTS}; do
         continue
     fi
 
-    METRIC_FILE="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+    if [ "${RETRIEVAL_ONLY}" = true ]; then
+        METRIC_FILE="${EVAL_OUTPUT_DIR}/retrieval_metrics_${SUBJECT}_encoder_only.csv"
+    else
+        METRIC_FILE="${EVAL_OUTPUT_DIR}/reconstruction_metrics_${SUBJECT}_encoder_only.csv"
+    fi
+
     if [ ! -f "${METRIC_FILE}" ]; then
-        echo "[WARN] Encoder-only metrics missing: ${METRIC_FILE}"
+        echo "[WARN] Metrics missing: ${METRIC_FILE}"
         continue
     fi
 
@@ -285,7 +343,11 @@ fi
 
 METRIC_LIST="${METRIC_FILES[*]}"
 SUBJECT_LIST="${COMPLETED_SUBJECTS[*]}"
-SUMMARY_CSV="${OUTPUT_DIR}/summary_encoder_only_$(date +%m-%d_%H-%M).csv"
+if [ "${RETRIEVAL_ONLY}" = true ]; then
+    SUMMARY_CSV="${OUTPUT_DIR}/summary_retrieval_$(date +%m-%d_%H-%M).csv"
+else
+    SUMMARY_CSV="${OUTPUT_DIR}/summary_encoder_only_$(date +%m-%d_%H-%M).csv"
+fi
 
 python3 - "${METRIC_LIST}" "${SUBJECT_LIST}" "${SUMMARY_CSV}" <<'PYEOF'
 import csv
@@ -392,7 +454,7 @@ with open(summary_path, 'w', newline='') as stream:
 per_subject_path = os.path.join(
     os.path.dirname(summary_path),
     os.path.basename(summary_path).replace(
-        'summary_encoder_only_', 'per_subject_encoder_only_', 1
+        'summary_', 'per_subject_', 1
     ),
 )
 with open(per_subject_path, 'w', newline='') as stream:
